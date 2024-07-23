@@ -1,3 +1,4 @@
+import os
 from datetime import timedelta
 from datetime import datetime as dt
 from flask import Blueprint, render_template, request, Flask, flash, session, redirect, url_for, send_from_directory, Response, make_response, jsonify
@@ -19,9 +20,7 @@ import sklearn.cluster
 
 
 
-
-connection_url_aws_app_user = 'postgresql+psycopg2://app:GsN5OjH5pgzeYQUeINJdLaXZuC2qdRGw9dIIdVMKfkwoe1UEGO@merchiq-db.cb84oey26z6v.us-east-2.rds.amazonaws.com/postgres'
-engine = sqlalchemy.create_engine(connection_url_aws_app_user)
+engine = sqlalchemy.create_engine(os.environ.get('DATABASE_URL'))
 
 
 ################################################################################################
@@ -103,7 +102,9 @@ def adblock():
     for cluster_n in range(n_clusters):
         cluster_mean = X[clustering.labels_==cluster_n].mean()
         cluster_sd = max(0.5, X[clustering.labels_==cluster_n].std())
-        adblocks[cluster_n] = {'min_price': max(0,round(cluster_mean-cluster_sd)), 'max_price': round(cluster_mean+cluster_sd)}
+        adblocks[cluster_n] = {'min_price': max(0,round(cluster_mean-cluster_sd)),
+                               'max_price': round(cluster_mean+cluster_sd),
+                               'item_names': }
 
     # re-order clusters
     keys = sorted(adblocks.keys(), key=lambda x: adblocks[x]['min_price']+adblocks[x]['max_price'])
