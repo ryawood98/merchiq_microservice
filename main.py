@@ -80,10 +80,11 @@ def adblock():
     ### query database
     with engine.begin() as conn:
         df = pd.read_sql(sqlalchemy.text('SELECT * FROM promos WHERE item_name ILIKE :item_name AND non_promo_price IS NOT NULL;'), conn, params={'item_name':'%'+item_name+'%'})
+    df = df.dropna(subset=['non_promo_price']).drop_duplicates(subset=['non_promo_price']).reset_index(drop=True)
 
 
     ### calculate adblocks
-    X = df['non_promo_price'].dropna().drop_duplicates().values.reshape(-1,1)
+    X = df['non_promo_price'].values.reshape(-1,1)
     if X.shape[0]==0:
         return jsonify({'error':'no items found'}), 404
     n_clusters_sums = np.zeros(5)
@@ -104,7 +105,7 @@ def adblock():
         cluster_sd = max(0.5, X[clustering.labels_==cluster_n].std())
         adblocks[cluster_n] = {'min_price': max(0,round(cluster_mean-cluster_sd)),
                                'max_price': round(cluster_mean+cluster_sd),
-                               'item_names': }
+                               'item_names': df['item_name'].values[clustering.labels_==cluster_n]}
 
     # re-order clusters
     keys = sorted(adblocks.keys(), key=lambda x: adblocks[x]['min_price']+adblocks[x]['max_price'])
