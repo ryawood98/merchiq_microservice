@@ -15,4 +15,4 @@ numpy
 stripe
 psycopg2
 sendgrid
-sklearn
+scikit-learn
