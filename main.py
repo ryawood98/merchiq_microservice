@@ -105,7 +105,7 @@ def adblock():
         cluster_sd = max(0.5, X[clustering.labels_==cluster_n].std())
         adblocks[cluster_n] = {'min_price': max(0,round(cluster_mean-cluster_sd)),
                                'max_price': round(cluster_mean+cluster_sd),
-                               'item_names': df['item_name'].values[clustering.labels_==cluster_n]}
+                               'item_names': df['item_name'].values[clustering.labels_==cluster_n].tolist()}
 
     # re-order clusters
     keys = sorted(adblocks.keys(), key=lambda x: adblocks[x]['min_price']+adblocks[x]['max_price'])
