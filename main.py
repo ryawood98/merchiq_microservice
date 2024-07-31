@@ -19,7 +19,6 @@ import sqlalchemy
 import sklearn.cluster
 
 
-
 engine = sqlalchemy.create_engine(os.environ.get('DATABASE_URL'))
 
 
