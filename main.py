@@ -1,11 +1,13 @@
 import os
 from datetime import datetime as dt
 from datetime import timedelta
+from typing import List
 
 import numpy as np
 import pandas as pd
 import sqlalchemy
 from flask import Flask, jsonify, request
+from pydantic import BaseModel, ValidationError
 
 # Create the flask app
 app = Flask(__name__)
@@ -14,22 +16,26 @@ app = Flask(__name__)
 engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL"))
 
 
-@app.route("/prediction", methods=["GET"])
+class PredictionRequest(BaseModel):
+    min_price: float
+    max_price: float
+    item_names: List[str]
+    retailer: str
+
+
+@app.route("/prediction", methods=["POST"])
 def prediction():
-    if (
-        not request.args.get("min_price")
-        or not request.args.get("max_price")
-        or not request.args.get("item_names")
-        or not request.args.get("retailer")
-    ):
-        return jsonify({"status": "Missing parameters", "data": request.args}), 400
     try:
-        min_price = float(request.args.get("min_price"))
-        max_price = float(request.args.get("max_price"))
-        item_names = request.args.getlist("item_names")
-        retailer = request.args.get("retailer")
-    except:
-        return jsonify({"status": "Bad parameters"}), 400
+        req = PredictionRequest(**request.json)
+    except ValidationError as e:
+        # If validation fails, return a 400 response with the validation errors
+        status = "Missing fields[min_price, max_price, item_names, retailer] in request"
+        return jsonify({"status": status}), 400
+
+    min_price = req.min_price
+    max_price = req.max_price
+    item_names = req.item_names
+    retailer = req.retailer
 
     ### query database
     with engine.begin() as conn:
