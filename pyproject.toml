@@ -1,0 +1,30 @@
+[build-system]
+requires = ["poetry>=0.12"]
+build-backend = "poetry.masonry.api"
+
+[tool.poetry]
+name = "merchiq-microservice"
+version = "0.1.0"
+description = "MerchIQ Microservices"
+authors = [
+  "Ryan Wood <ryawood98@gmail.com>",
+  "Kevin Zhao <kzhao16@gmail.com>",
+]
+license = "MIT"
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.10"
+flask = "^3.0.3"
+python-dotenv = "^1.0.1"
+numpy = "^2.0.1"
+pandas = "^2.2.2"
+sqlalchemy = "^2.0.31"
+psycopg2 = "^2.9.9"
+scipy = "^1.14.0"
+
+[tool.poetry.dev-dependencies]
+pytest = "^6.2.4"
+black = "^22.3.0"
+isort = "^5.13.2"
