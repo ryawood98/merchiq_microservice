@@ -1,197 +1,33 @@
 import os
-from datetime import timedelta
 from datetime import datetime as dt
-from flask import (
-    Blueprint,
-    render_template,
-    request,
-    Flask,
-    flash,
-    session,
-    redirect,
-    url_for,
-    send_from_directory,
-    Response,
-    make_response,
-    jsonify,
-)
-import flask_login
-from flask_wtf import FlaskForm
-from flask_wtf.csrf import CSRFProtect
-from wtforms import (
-    StringField,
-    PasswordField,
-    BooleanField,
-    DecimalField,
-    RadioField,
-    SelectField,
-    TextAreaField,
-    FileField,
-    EmailField,
-)
-from werkzeug.security import generate_password_hash, check_password_hash
-from wtforms.validators import (
-    DataRequired,
-    InputRequired,
-    Length,
-    EqualTo,
-    Email,
-    AnyOf,
-)
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from flask_sqlalchemy import SQLAlchemy
-from flask_talisman import Talisman
-import psycopg2
+from datetime import timedelta
+
 import numpy as np
 import pandas as pd
 import sqlalchemy
-import sklearn.cluster
+from flask import Flask, jsonify, request
 
+# Create the flask app
+app = Flask(__name__)
 
+# Connect to the database
 engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL"))
 
 
-################################################################################################
-### initialize Flask app
-################################################################################################
-
-app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY")
-
-# configure Flask-Talisman (for forcing HTTPS)
-csp = {
-    "default-src": "'self'",
-    "script-src": "'self'",
-}
-talisman = Talisman(
-    app,
-    content_security_policy=False,  # csp,
-    content_security_policy_nonce_in=["script-src", "style-src"],
-)
-
-# define Flask-Limiter object
-limiter = Limiter(key_func=get_remote_address)
-
-# configure Flask-Session
-app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
-
-# configure Flask-Limiter
-app.config["RATELIMIT_DEFAULT"] = "1000 / day, 500 / hour"
-app.config["RATELIMIT_STORAGE_URI"] = "memory://"
-limiter.init_app(app)
-
-
-@app.errorhandler(429)
-def ratelimit_handler(e):
-    return
-
-
-# configure Flask-WTF
-# csrf = CSRFProtect(app)
-
-
-################################################################################################
-### create endpoint
-################################################################################################
-
-
-@app.route("/adblock", methods=("GET",))
-def adblock():
-
-    ### parse request arguments for list of search parameters
-    retailer = request.args.get("retailer")
-    sector = request.args.get("sector")
-    category = request.args.get("category")
-    brand = request.args.get("brand")
-    item_name = request.args.get("item_name")
-    # if retailer is None or sector is None or category is None or brand is None or item_name is None:
-    #     return jsonify({'status':'invalid request'}), 400
-
-    ### query database
-    with engine.begin() as conn:
-        df = pd.read_sql(
-            sqlalchemy.text(
-                "SELECT * FROM promos WHERE item_name ILIKE :item_name AND non_promo_price IS NOT NULL;"
-            ),
-            conn,
-            params={"item_name": "%" + item_name + "%"},
-        )
-    df = (
-        df.dropna(subset=["non_promo_price"])
-        .drop_duplicates(subset=["non_promo_price"])
-        .reset_index(drop=True)
-    )
-
-    ### calculate adblocks
-    X = df["non_promo_price"].values.reshape(-1, 1)
-    if X.shape[0] == 0:
-        return jsonify({"error": "no items found"}), 404
-    n_clusters_sums = np.zeros(5)
-    for n_clusters in range(1, 6):
-        clustering = sklearn.cluster.AgglomerativeClustering(n_clusters=n_clusters).fit(
-            X
-        )
-        clusters = clustering.labels_
-        n_clusters_sums[n_clusters - 1] = sum(
-            [
-                abs(X[clusters == i] - X[clusters == i].mean()).mean()
-                for i in range(clustering.n_clusters_)
-            ]
-        )
-
-    # determine best number of clusters by finding last n_clusters with big enough reduction in mean distance
-    min_mean_distance = 1
-    n_clusters = (
-        np.where((n_clusters_sums[:-1] - n_clusters_sums[1:]) > min_mean_distance)[0][
-            -1
-        ]
-        + 2
-    )
-
-    # define adblocks
-    adblocks = dict()
-    clustering = sklearn.cluster.AgglomerativeClustering(n_clusters=n_clusters).fit(X)
-    for cluster_n in range(n_clusters):
-        cluster_mean = X[clustering.labels_ == cluster_n].mean()
-        cluster_sd = max(0.5, X[clustering.labels_ == cluster_n].std())
-        adblocks[cluster_n] = {
-            "min_price": max(0, round(cluster_mean - cluster_sd)),
-            "max_price": round(cluster_mean + cluster_sd),
-            "item_names": df["item_name"]
-            .values[clustering.labels_ == cluster_n]
-            .tolist(),
-        }
-
-    # re-order clusters
-    keys = sorted(
-        adblocks.keys(),
-        key=lambda x: adblocks[x]["min_price"] + adblocks[x]["max_price"],
-    )
-    adblocks = {cluster_n: adblocks[keys[cluster_n]] for cluster_n in range(n_clusters)}
-
-    ### return adblocks
-    return jsonify(adblocks), 200
-
-
-@app.route("/prediction", methods=("GET",))
+@app.route("/prediction", methods=["GET"])
 def prediction():
-
-    ### parse request arguments for list of adblocks
-    # data = request.get_json()
-    # print('data', data)
     if (
         not request.args.get("min_price")
         or not request.args.get("max_price")
         or not request.args.get("item_names")
         or not request.args.get("retailer")
     ):
-        return jsonify({"status": "Missing parameters"}), 400
+        return jsonify({"status": "Missing parameters", "data": request.args}), 400
     try:
         min_price = float(request.args.get("min_price"))
         max_price = float(request.args.get("max_price"))
         item_names = request.args.getlist("item_names")
-        print("item_names:", item_names)
+        retailer = request.args.get("retailer")
     except:
         return jsonify({"status": "Bad parameters"}), 400
 
@@ -199,13 +35,14 @@ def prediction():
     with engine.begin() as conn:
         df = pd.read_sql(
             sqlalchemy.text(
-                "SELECT * FROM promos WHERE item_name IN :item_names AND non_promo_price BETWEEN :min_price AND :max_price;"
+                "SELECT * FROM promos WHERE item_name IN :item_names AND non_promo_price BETWEEN :min_price AND :max_price AND retailer = :retailer;"
             ),
             conn,
             params={
                 "item_names": tuple(item_names),
                 "min_price": min_price,
                 "max_price": max_price,
+                "retailer": retailer,
             },
             parse_dates=["retailer_week"],
         )
