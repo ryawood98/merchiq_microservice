@@ -60,8 +60,8 @@ def prediction():
     # create calendar to help create merch grid
     min_date = df["retailer_week"].min() - timedelta(
         days=7
-        * (df["retailer_week"].min() - (dt.now() - timedelta(days=7 * 104))).days
-        // 7
+        * ((df["retailer_week"].min() - (dt.now() - timedelta(days=7 * 104))).days
+        // 7)
     )
     max_date = df["retailer_week"].min() + timedelta(
         days=7
