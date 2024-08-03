@@ -16,3 +16,4 @@ stripe
 psycopg2
 sendgrid
 scikit-learn
+pydantic
