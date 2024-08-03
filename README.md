@@ -26,3 +26,33 @@ poetry install
 ```
 
 After the above is accomplished you should have all the packages necessary for this project. Run `pip freeze` to verify.
+
+
+
+
+
+
+
+
+## Deploying app to Heroku
+The app is deployed to Heroku by pushing the repo to Heroku. To add the heroku repository use the following command:
+
+```
+heroku git:remote -a merchiq-microservice
+```
+
+Then you can push changes with the following commands:
+
+```
+git add .
+git commit -m "commit message"
+git push heroku main
+```
+
+This requires you to push from a repo with access to the heroku project (currently ryawood98@gmail.com and kzhao16@gmail.com). It also may prompt you to login to heroku, in which case you can login with:
+
+```
+heroku login
+```
+
+which will open a browser window and allow you to log in to Heroku using 2-factor authentication.
