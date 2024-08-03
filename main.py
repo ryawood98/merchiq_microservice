@@ -8,9 +8,11 @@ import pandas as pd
 import sqlalchemy
 from flask import Flask, jsonify, request
 from pydantic import BaseModel, ValidationError
+from flask_cors import CORS
 
 # Create the flask app
 app = Flask(__name__)
+CORS(app)
 
 # Connect to the database
 engine = sqlalchemy.create_engine(os.environ.get("DATABASE_URL"))
@@ -77,7 +79,7 @@ AND retailer = :retailer;"
     df["is_offer"] = df["offer_message_0"].notnull().astype(int)
     if df.shape[0] == 0:
         res = PredictionResponse(
-            status="No items found",
+            status="NO ITEMS FOUND",
             data=None,
         )
         return jsonify(res.model_dump()), 400
@@ -158,7 +160,7 @@ AND retailer = :retailer;"
         ),
     )
     res = PredictionResponse(
-        status="Good request",
+        status="GOOD REQUEST",
         data=data_pred,
     )
     return jsonify(res.model_dump()), 200
