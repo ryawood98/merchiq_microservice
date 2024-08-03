@@ -26,3 +26,17 @@ poetry install
 ```
 
 After the above is accomplished you should have all the packages necessary for this project. Run `pip freeze` to verify.
+
+
+
+
+
+
+
+
+## Deploying app to Heroku
+The app is deployed to Heroku by pushing the repo to Heroku. Do this with the following commands:
+
+```
+
+
