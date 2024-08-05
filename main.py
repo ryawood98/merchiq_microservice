@@ -133,19 +133,19 @@ AND retailer = :retailer;"
     ]
 
     historical_week = merch_grid_raw.loc[
-        (merch_grid_raw["retailer_week"] < dt.now()),
+        (merch_grid_raw["retailer_week"] < right_now),
         "retailer_week",
     ].to_list()
     historical_discount = merch_grid_raw.loc[
-        (merch_grid_raw["retailer_week"] < dt.now()),
+        (merch_grid_raw["retailer_week"] < right_now),
         mechanic_col,
     ].to_list()
     prediction_week = merch_grid_raw.loc[
-        (merch_grid_raw["retailer_week"] >= dt.now()),
+        (merch_grid_raw["retailer_week"] >= right_now),
         "retailer_week",
     ].to_list()
     prediction_discount = merch_grid_raw.loc[
-        (merch_grid_raw["retailer_week"] >= dt.now()),
+        (merch_grid_raw["retailer_week"] >= right_now),
         mechanic_col + "_predicted",
     ].to_list()
 
