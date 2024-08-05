@@ -7,8 +7,8 @@ import numpy as np
 import pandas as pd
 import sqlalchemy
 from flask import Flask, jsonify, request
-from pydantic import BaseModel, ValidationError
 from flask_cors import CORS
+from pydantic import BaseModel, ValidationError
 
 # Create the flask app
 app = Flask(__name__)
@@ -26,7 +26,7 @@ class PredictionRequest(BaseModel):
 
 
 class DataSeries(BaseModel):
-    week: List[dt]
+    week: List[str]
     discount: List[float]
 
 
@@ -38,6 +38,10 @@ class DataPred(BaseModel):
 class PredictionResponse(BaseModel):
     status: str
     data: DataPred | None
+
+
+def convert_time(date: dt):
+    return str(date).replace(" ", "T")
 
 
 @app.route("/prediction", methods=["POST"])
@@ -151,11 +155,11 @@ AND retailer = :retailer;"
 
     data_pred = DataPred(
         historical=DataSeries(
-            week=historical_week,
+            week=list(map(convert_time, historical_week)),
             discount=historical_discount,
         ),
         prediction=DataSeries(
-            week=prediction_week,
+            week=list(map(convert_time, prediction_week)),
             discount=prediction_discount,
         ),
     )
