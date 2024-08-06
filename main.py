@@ -75,7 +75,7 @@ AND retailer = :retailer;"
         )
 
     # TPR = Temporary Price Reduction
-    df["tpr_disc"] = df["non_promo_price"] - df["promo_price"]
+    df["tpr_disc"] = df["non_promo_price"] - df["promo_price"].fillna(df["non_promo_price"])
     df["is_offer"] = df["offer_message_0"].notnull().astype(int)
     if df.shape[0] == 0:
         res = PredictionResponse(
