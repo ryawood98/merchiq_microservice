@@ -22,17 +22,24 @@ class PredictionRequest(BaseModel):
     min_price: float
     max_price: float
     item_names: List[str]
-    retailer: str
+    retailers: List[str]
 
 
 class DataSeries(BaseModel):
-    week: List[str]
+    week: List[dt]
     discount: List[float]
+    label: List[str]
 
 
 class DataPred(BaseModel):
-    historical: DataSeries
-    prediction: DataSeries
+    historical_tpr: DataSeries
+    prediction_tpr: DataSeries
+
+    historical_crl: DataSeries
+    prediction_crl: DataSeries
+
+    historical_coupon: DataSeries
+    prediction_coupon: DataSeries
 
 
 class PredictionResponse(BaseModel):
@@ -40,15 +47,12 @@ class PredictionResponse(BaseModel):
     data: DataPred | None
 
 
-def convert_time(date: dt):
-    return str(date).replace(" ", "T")
-
-
 @app.route("/prediction", methods=["POST"])
 def prediction():
     try:
         req = PredictionRequest(**request.json)
     except ValidationError as e:
+        print(e)
         error = str(e)
         res = PredictionResponse(
             status=error,
@@ -59,12 +63,12 @@ def prediction():
     min_price = req.min_price
     max_price = req.max_price
     item_names = req.item_names
-    retailer = req.retailer
+    retailers = req.retailers
 
     # Query the database to get the data that we need
     query = "SELECT * FROM promos WHERE item_name IN :item_names \
-AND non_promo_price BETWEEN :min_price AND :max_price \
-AND retailer = :retailer;"
+    AND (non_promo_price IS NULL OR non_promo_price BETWEEN :min_price AND :max_price) \
+    AND retailer IN :retailers;"
     with engine.begin() as conn:
         df = pd.read_sql(
             sqlalchemy.text(query),
@@ -73,20 +77,18 @@ AND retailer = :retailer;"
                 "item_names": tuple(item_names),
                 "min_price": min_price,
                 "max_price": max_price,
-                "retailer": retailer,
+                "retailers": tuple(retailers),
             },
             parse_dates=["retailer_week"],
         )
 
     # TPR = Temporary Price Reduction
-    df["tpr_disc"] = df["non_promo_price"] - df["promo_price"].fillna(df["non_promo_price"])
+    df["tpr_disc"] = df["non_promo_price"].fillna(
+        (df["promo_price"] / 0.8).round()
+    ) - df["promo_price"].fillna(df["non_promo_price"])
     df["is_offer"] = df["offer_message_0"].notnull().astype(int)
     if df.shape[0] == 0:
-        res = PredictionResponse(
-            status="NO ITEMS FOUND",
-            data=None,
-        )
-        return jsonify(res.model_dump()), 400
+        print("No items found")
 
     # Look at the minimum date in our data but synced with the cadence
     # of the minimum and maximum promotion date
@@ -108,59 +110,317 @@ AND retailer = :retailer;"
     calendar["week"] = calendar["retailer_week"].dt.isocalendar().week
     calendar["year"] = calendar["retailer_week"].dt.isocalendar().year
 
+    historical_week = calendar.loc[
+        (calendar["retailer_week"] < dt.now()),
+        "retailer_week",
+    ].to_list()
+    prediction_week = calendar.loc[
+        (calendar["retailer_week"] >= dt.now()),
+        "retailer_week",
+    ].to_list()
+
+    merch_grid_master = calendar.copy()
+
+    ####### TPR Modeling ############
+
     # Create prediction for adblock
     ## Create merch grid
-    mechanic_col = "tpr_disc"
-    merch_grid_raw = (
-        df.loc[df["non_promo_price"].between(min_price, max_price)]
-        .groupby(by=["retailer_week"])[[mechanic_col]]
-        .median()
-        .dropna()
+    def quantify_tpr(s):
+        # given a series of products/metrics for one date, return a number and a displayable string for the tpr offer
+        tpr_discount = s["tpr_disc"]
+        tpr_discount_description = "$" + "{:.2f}".format(tpr_discount)
+        return pd.Series(
+            {"tpr_disc": tpr_discount, "tpr_disc_desc": tpr_discount_description}
+        )
+
+    merch_grid = df.apply(quantify_tpr, axis=1)
+    merch_grid = df.drop(["tpr_disc"], axis=1).join(merch_grid, how="inner")
+    merch_grid = (
+        merch_grid.groupby(by=["retailer_week"])[["tpr_disc", "tpr_disc_desc"]]
+        .max()
+        .reset_index()
     )
-    merch_grid_raw = calendar.merge(merch_grid_raw, on="retailer_week", how="left")
-    merch_grid_raw[mechanic_col] = merch_grid_raw[mechanic_col].fillna(0.0).round(2)
+    merch_grid = calendar.merge(merch_grid, on="retailer_week", how="left")
+    merch_grid["tpr_disc"] = merch_grid["tpr_disc"].fillna(0.0).round(2)
+    merch_grid["tpr_disc_desc"] = merch_grid["tpr_disc_desc"].fillna("$0.00")
 
     # Create discount model
     ## Create lagged promo
-    merch_grid_raw[mechanic_col + "_ly"] = (
-        merch_grid_raw[mechanic_col].shift(52).fillna(0.0)
-    )
+    merch_grid["tpr_disc_ly"] = merch_grid["tpr_disc"].shift(52).fillna(0.0)
+    merch_grid["tpr_disc_desc_ly"] = merch_grid["tpr_disc_desc"].shift(52)
 
     # Create smoothed ly promo
-    merch_grid_raw[mechanic_col + "_smoothed"] = (
-        merch_grid_raw[mechanic_col + "_ly"]
+    merch_grid["tpr_disc_smoothed"] = (
+        merch_grid["tpr_disc_ly"]
         .rolling(window=3, center=True, win_type="gaussian", min_periods=1)
         .mean(std=1)
     )
-    merch_grid_raw[mechanic_col + "_predicted"] = merch_grid_raw[
-        mechanic_col + "_smoothed"
-    ]
+    merch_grid["tpr_disc_predicted"] = merch_grid["tpr_disc_smoothed"]
+    merch_grid["tpr_disc_desc_predicted"] = "$" + merch_grid[
+        "tpr_disc_predicted"
+    ].apply(lambda x: "{:.2f}".format(x))
 
-    historical_week = merch_grid_raw.loc[
-        (merch_grid_raw["retailer_week"] < right_now),
-        "retailer_week",
+    # Merge coupon data into master merch grid
+    merch_grid_master = merch_grid_master.merge(
+        merch_grid, on=["retailer_week", "week", "year"]
+    )
+
+    # Create lists to send to client
+    historical_disc_tpr = merch_grid.loc[
+        (merch_grid["retailer_week"] < dt.now()), "tpr_disc"
     ].to_list()
-    historical_discount = merch_grid_raw.loc[
-        (merch_grid_raw["retailer_week"] < right_now),
-        mechanic_col,
+    historical_disc_tpr_desc = merch_grid.loc[
+        (merch_grid["retailer_week"] < dt.now()), "tpr_disc_desc"
     ].to_list()
-    prediction_week = merch_grid_raw.loc[
-        (merch_grid_raw["retailer_week"] >= right_now),
-        "retailer_week",
+    prediction_disc_tpr = merch_grid.loc[
+        (merch_grid["retailer_week"] >= dt.now()), "tpr_disc_predicted"
     ].to_list()
-    prediction_discount = merch_grid_raw.loc[
-        (merch_grid_raw["retailer_week"] >= right_now),
-        mechanic_col + "_predicted",
+    prediction_disc_tpr_desc = merch_grid.loc[
+        (merch_grid["retailer_week"] >= dt.now()), "tpr_disc_desc_predicted"
+    ].to_list()
+
+    ####### CRL Modeling ############
+
+    # Create prediction for adblock
+    ## Create merch grid
+    def quantify_crl(s):
+        ### given a series of products/metrics for one date, return a number and a displayable string for the crl offer
+
+        if pd.notnull(s["quantity_threshold"]):
+            if s["quantity_threshold"] > 1:
+
+                # 2F10
+                if pd.notnull(s["reward_total_price"]):
+                    if pd.notnull(s["non_promo_price_est"]):
+                        crl_disc = (
+                            s["non_promo_price"]
+                            - s["reward_total_price"] / s["quantity_threshold"]
+                        )
+                        return pd.Series(
+                            {
+                                "crl_disc": crl_disc,
+                                "crl_disc_desc": "Buy "
+                                + str(int(s["quantity_threshold"]))
+                                + " Save $"
+                                + "{:.2f}".format(crl_disc)
+                                + " Each",
+                            }
+                        )
+                    else:
+                        return pd.Series({"crl_disc": 0.0, "crl_disc_desc": "$0.00"})
+
+                # B5S5
+                elif pd.notnull(s["reward_dollars"]):
+                    crl_disc = s["reward_dollars"] / s["quantity_threshold"]
+                    return pd.Series(
+                        {
+                            "crl_disc": crl_disc,
+                            "crl_disc_desc": "Buy "
+                            + str(int(s["quantity_threshold"]))
+                            + " Save $"
+                            + "{:.2f}".format(crl_disc)
+                            + " Each",
+                        }
+                    )
+
+                # BOGO
+                elif pd.notnull(s["reward_percent"]):
+                    if pd.notnull(s["non_promo_price_est"]):
+                        crl_disc = (
+                            s["non_promo_price_est"]
+                            * s["reward_percent"]
+                            / s["quantity_threshold"]
+                        )
+                        return pd.Series(
+                            {
+                                "crl_disc": crl_disc,
+                                "crl_disc_desc": "Buy "
+                                + str(int(s["quantity_threshold"]))
+                                + " Save "
+                                + str(int(s["reward_percent"]))
+                                + "% of One",
+                            }
+                        )
+                    else:
+                        return pd.Series({"crl_disc": 0.0, "crl_disc_desc": "$0.00"})
+            else:
+                return pd.Series({"crl_disc": 0.0, "crl_disc_desc": "$0.00"})
+
+        elif pd.notnull(s["spend_threshold"]):
+
+            # S25S5
+            if pd.notnull(s["reward_dollars"]):
+                if pd.notnull(s["non_promo_price_est"]):
+                    crl_disc = s["reward_dollars"] / (
+                        s["spend_threshold"] / s["non_promo_price_est"]
+                    )
+                    return pd.Series(
+                        {
+                            "crl_disc": crl_disc,
+                            "crl_disc_desc": "Spend $"
+                            + "{:.2f}".format(s["spend_threshold"])
+                            + " Save $"
+                            + "{:.2f}".format(s["reward_dollars"]),
+                        }
+                    )
+                else:
+                    crl_disc = s["reward_dollars"]
+                    return pd.Series(
+                        {
+                            "crl_disc": crl_disc,
+                            "crl_disc_desc": "$" + "{:.2f}".format(crl_disc),
+                        }
+                    )
+            else:
+                return pd.Series({"crl_disc": 0.0, "crl_disc_desc": "$0.00"})
+
+        else:
+            return pd.Series({"crl_disc": 0.0, "crl_disc_desc": "$0.00"})
+
+    merch_grid = df.apply(quantify_crl, axis=1)
+    merch_grid = df.join(merch_grid, how="inner")
+    merch_grid = (
+        merch_grid.groupby(by=["retailer_week"])[["crl_disc", "crl_disc_desc"]]
+        .max()
+        .reset_index()
+    )
+    merch_grid = calendar.merge(merch_grid, on="retailer_week", how="left")
+    merch_grid["crl_disc"] = merch_grid["crl_disc"].fillna(0.0).round(2)
+    merch_grid["crl_disc_desc"] = merch_grid["crl_disc_desc"].fillna("$0.00")
+
+    # Create discount model
+    ## Create lagged promo
+    merch_grid["crl_disc_ly"] = merch_grid["crl_disc"].shift(52).fillna(0.0)
+    merch_grid["crl_disc_desc_ly"] = merch_grid["crl_disc_desc"].shift(52)
+
+    # Create smoothed ly promo
+    merch_grid["crl_disc_smoothed"] = (
+        merch_grid["crl_disc_ly"]
+        .rolling(window=3, center=True, win_type="gaussian", min_periods=1)
+        .mean(std=1)
+    )
+    merch_grid["crl_disc_predicted"] = merch_grid["crl_disc_smoothed"]
+    merch_grid["crl_disc_desc_predicted"] = merch_grid["crl_disc_desc_ly"]
+
+    # Merge coupon data into master merch grid
+    merch_grid_master = merch_grid_master.merge(
+        merch_grid, on=["retailer_week", "week", "year"]
+    )
+
+    # Create lists to send to client
+    historical_disc_crl = merch_grid.loc[
+        (merch_grid["retailer_week"] < dt.now()), "crl_disc"
+    ].to_list()
+    historical_disc_crl_desc = merch_grid.loc[
+        (merch_grid["retailer_week"] < dt.now()), "crl_disc_desc"
+    ].to_list()
+    prediction_disc_crl = merch_grid.loc[
+        (merch_grid["retailer_week"] >= dt.now()),
+        "crl_disc_predicted",
+    ].to_list()
+    prediction_disc_crl_desc = merch_grid.loc[
+        (merch_grid["retailer_week"] >= dt.now()),
+        "crl_disc_desc_predicted",
+    ].to_list()
+
+    ####### Coupon Modeling ############
+
+    # Create prediction for adblock
+    ## Create merch grid
+    def quantify_coupon(s):
+        ### given a series of products/metrics for one date, return a number and a displayable string for the crl offer
+
+        if pd.notnull(s["coupon_quantity_threshold"]):
+
+            # $5 Off 3
+            if pd.notnull(s["coupon_dollar_value"]):
+                coupon_disc = s["coupon_dollar_value"] / s["coupon_quantity_threshold"]
+                return pd.Series(
+                    {
+                        "coupon_disc": coupon_disc,
+                        "coupon_disc_desc": "$"
+                        + "{:.2f}".format(s["coupon_dollar_value"])
+                        + " Off "
+                        + str(int(s["coupon_quantity_threshold"])),
+                    }
+                )
+
+        return pd.Series({"coupon_disc": 0.0, "coupon_disc_desc": "$0.00"})
+
+    merch_grid = df.apply(quantify_coupon, axis=1)
+    merch_grid = df.join(merch_grid, how="inner")
+    merch_grid = (
+        merch_grid.groupby(by=["retailer_week"])[["coupon_disc", "coupon_disc_desc"]]
+        .max()
+        .reset_index()
+    )
+    merch_grid = calendar.merge(merch_grid, on="retailer_week", how="left")
+    merch_grid["coupon_disc"] = merch_grid["coupon_disc"].fillna(0.0).round(2)
+    merch_grid["coupon_disc_desc"] = merch_grid["coupon_disc_desc"].fillna("$0.00")
+
+    # Create discount model
+    ## Create lagged promo
+    merch_grid["coupon_disc_ly"] = merch_grid["coupon_disc"].shift(52).fillna(0.0)
+    merch_grid["coupon_disc_desc_ly"] = merch_grid["coupon_disc_desc"].shift(52)
+
+    # Create smoothed ly promo
+    merch_grid["coupon_disc_smoothed"] = (
+        merch_grid["coupon_disc_ly"]
+        .rolling(window=3, center=True, win_type="gaussian", min_periods=1)
+        .mean(std=1)
+    )
+    merch_grid["coupon_disc_predicted"] = merch_grid["coupon_disc_smoothed"]
+    merch_grid["coupon_disc_desc_predicted"] = merch_grid["coupon_disc_desc_ly"]
+
+    # Merge coupon data into master merch grid
+    merch_grid_master = merch_grid_master.merge(
+        merch_grid, on=["retailer_week", "week", "year"]
+    )
+
+    # Create lists to send to client
+    historical_disc_coupon = merch_grid.loc[
+        (merch_grid["retailer_week"] < dt.now()), "coupon_disc"
+    ].to_list()
+    historical_disc_coupon_desc = merch_grid.loc[
+        (merch_grid["retailer_week"] < dt.now()), "coupon_disc_desc"
+    ].to_list()
+    prediction_disc_coupon = merch_grid.loc[
+        (merch_grid["retailer_week"] >= dt.now()), "coupon_disc_predicted"
+    ].to_list()
+    prediction_disc_coupon_desc = merch_grid.loc[
+        (merch_grid["retailer_week"] >= dt.now()), "coupon_disc_desc_predicted"
     ].to_list()
 
     data_pred = DataPred(
-        historical=DataSeries(
-            week=list(map(convert_time, historical_week)),
-            discount=historical_discount,
+        historical_tpr=DataSeries(
+            week=historical_week,
+            discount=historical_disc_tpr,
+            label=historical_disc_tpr_desc,
         ),
-        prediction=DataSeries(
-            week=list(map(convert_time, prediction_week)),
-            discount=prediction_discount,
+        prediction_tpr=DataSeries(
+            week=prediction_week,
+            discount=prediction_disc_tpr,
+            label=prediction_disc_tpr_desc,
+        ),
+        historical_crl=DataSeries(
+            week=historical_week,
+            discount=historical_disc_crl,
+            label=historical_disc_crl_desc,
+        ),
+        prediction_crl=DataSeries(
+            week=prediction_week,
+            discount=prediction_disc_crl,
+            label=prediction_disc_crl_desc,
+        ),
+        historical_coupon=DataSeries(
+            week=historical_week,
+            discount=historical_disc_coupon,
+            label=historical_disc_coupon_desc,
+        ),
+        prediction_coupon=DataSeries(
+            week=prediction_week,
+            discount=prediction_disc_coupon,
+            label=prediction_disc_coupon_desc,
         ),
     )
     res = PredictionResponse(
