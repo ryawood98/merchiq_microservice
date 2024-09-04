@@ -22,7 +22,7 @@ class PredictionRequest(BaseModel):
     min_price: float
     max_price: float
     item_names: List[str]
-    retailer: str
+    retailers: List[str]
 
 
 class DataSeries(BaseModel):
@@ -50,10 +50,10 @@ class PredictionResponse(BaseModel):
 
 @app.route("/prediction", methods=["POST"])
 def prediction():
-    print(request.json)
     try:
         req = PredictionRequest(**request.json)
     except ValidationError as e:
+        print(e)
         error = str(e)
         res = PredictionResponse(
             status=error,
@@ -64,12 +64,12 @@ def prediction():
     min_price = req.min_price
     max_price = req.max_price
     item_names = req.item_names
-    retailer = req.retailer
+    retailers = req.retailers
 
     # Query the database to get the data that we need
     query = "SELECT * FROM promos WHERE item_name IN :item_names \
     AND (non_promo_price IS NULL OR non_promo_price BETWEEN :min_price AND :max_price) \
-    AND retailer = :retailer;"
+    AND retailer IN :retailers;"
     with engine.begin() as conn:
         df = pd.read_sql(
             sqlalchemy.text(query),
@@ -78,13 +78,13 @@ def prediction():
                 "item_names": tuple(item_names),
                 "min_price": min_price,
                 "max_price": max_price,
-                "retailer": retailer,
+                "retailers": tuple(retailers),
             },
             parse_dates=["retailer_week"],
         )
 
     # TPR = Temporary Price Reduction
-    df["tpr_disc"] = df["non_promo_price"] - df["promo_price"].fillna(df["non_promo_price"])
+    df["tpr_disc"] = df["non_promo_price"].fillna((df["promo_price"]/0.8).round()) - df["promo_price"].fillna(df["non_promo_price"])
     df["is_offer"] = df["offer_message_0"].notnull().astype(int)
     if df.shape[0] == 0:
         print('No items found')
@@ -129,10 +129,12 @@ def prediction():
     ## Create merch grid
     def quantify_tpr(s):
         # given a series of products/metrics for one date, return a number and a displayable string for the tpr offer
-        tpr_discount = s['tpr_disc'].median()
+        tpr_discount = s['tpr_disc']
         tpr_discount_description = '$'+'{:.2f}'.format(tpr_discount)
         return pd.Series({'tpr_disc': tpr_discount, 'tpr_disc_desc': tpr_discount_description})
-    merch_grid = df.groupby(by=["retailer_week"])[['tpr_disc']].apply(quantify_tpr)
+    merch_grid = df.apply(quantify_tpr, axis=1)
+    merch_grid = df.drop(['tpr_disc'], axis=1).join(merch_grid, how='inner')
+    merch_grid = merch_grid.groupby(by=['retailer_week'])[['tpr_disc','tpr_disc_desc']].max().reset_index()
     merch_grid = calendar.merge(merch_grid, on="retailer_week", how="left")
     merch_grid['tpr_disc'] = merch_grid['tpr_disc'].fillna(0.0).round(2)
     merch_grid['tpr_disc_desc'] = merch_grid['tpr_disc_desc'].fillna('$0.00')
@@ -209,7 +211,7 @@ def prediction():
             return pd.Series({'crl_disc': 0., 'crl_disc_desc': '$0.00'})
     merch_grid = df.apply(quantify_crl, axis=1)
     merch_grid = df.join(merch_grid, how='inner')
-    merch_grid = merch_grid.groupby(by=['retailer_week'])[['crl_disc','crl_disc_desc']].first().reset_index()
+    merch_grid = merch_grid.groupby(by=['retailer_week'])[['crl_disc','crl_disc_desc']].max().reset_index()
     merch_grid = calendar.merge(merch_grid, on="retailer_week", how="left")
     merch_grid['crl_disc'] = merch_grid['crl_disc'].fillna(0.0).round(2)
     merch_grid['crl_disc_desc'] = merch_grid['crl_disc_desc'].fillna('$0.00')
@@ -252,7 +254,7 @@ def prediction():
         return pd.Series({'coupon_disc': 0., 'coupon_disc_desc': '$0.00'})
     merch_grid = df.apply(quantify_coupon, axis=1)
     merch_grid = df.join(merch_grid, how='inner')
-    merch_grid = merch_grid.groupby(by=['retailer_week'])[['coupon_disc','coupon_disc_desc']].first().reset_index()
+    merch_grid = merch_grid.groupby(by=['retailer_week'])[['coupon_disc','coupon_disc_desc']].max().reset_index()
     merch_grid = calendar.merge(merch_grid, on="retailer_week", how="left")
     merch_grid['coupon_disc'] = merch_grid['coupon_disc'].fillna(0.0).round(2)
     merch_grid['coupon_disc_desc'] = merch_grid['coupon_disc_desc'].fillna('$0.00')
