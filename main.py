@@ -31,6 +31,10 @@ class DataSeries(BaseModel):
     label: List[str]
 
 
+class CsvData(BaseModel):
+    csv_payload: str
+
+
 class DataPred(BaseModel):
     historical_tpr: DataSeries
     prediction_tpr: DataSeries
@@ -40,6 +44,8 @@ class DataPred(BaseModel):
 
     historical_coupon: DataSeries
     prediction_coupon: DataSeries
+
+    download_content: CsvData
 
 
 class PredictionResponse(BaseModel):
@@ -83,9 +89,14 @@ def prediction():
         )
 
     # TPR = Temporary Price Reduction
-    df["tpr_disc"] = df["non_promo_price"].fillna(
-        (df["promo_price"] / 0.8).round()
-    ) - df["promo_price"].fillna(df["non_promo_price"])
+    idx_tpr_promo_price_null = df["tpr_disc"].isnull() & df["promo_price"].isnull()
+    df.loc[idx_tpr_promo_price_null, "tpr_disc"] = 0
+    idx_tpr_null = df["tpr_disc"].isnull()
+    df.loc[idx_tpr_null, "tpr_disc"] = df.loc[idx_tpr_null, "non_promo_price"].fillna(
+        (df.loc[idx_tpr_null, "promo_price"] / 0.8).round()
+    ) - df.loc[idx_tpr_null, "promo_price"].fillna(
+        df.loc[idx_tpr_null, "non_promo_price"]
+    )
     df["is_offer"] = df["offer_message_0"].notnull().astype(int)
     if df.shape[0] == 0:
         print("No items found")
@@ -391,6 +402,24 @@ def prediction():
         (merch_grid["retailer_week"] >= dt.now()), "coupon_disc_desc_predicted"
     ].to_list()
 
+    # create "Download" csv payload data to send to client
+    csv_payload = merch_grid_master[
+        [
+            "retailer_week",
+            "year",
+            "week",
+            "tpr_disc",
+            "tpr_disc_desc",
+            "tpr_disc_predicted",
+            "crl_disc",
+            "crl_disc_desc",
+            "crl_disc_predicted",
+            "coupon_disc",
+            "coupon_disc_desc",
+            "coupon_disc_predicted",
+        ]
+    ].to_csv(index=False)
+
     data_pred = DataPred(
         historical_tpr=DataSeries(
             week=historical_week,
@@ -422,6 +451,7 @@ def prediction():
             discount=prediction_disc_coupon,
             label=prediction_disc_coupon_desc,
         ),
+        download_content=CsvData(csv_payload=csv_payload),
     )
     res = PredictionResponse(
         status="GOOD REQUEST",
