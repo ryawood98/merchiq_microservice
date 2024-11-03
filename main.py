@@ -530,7 +530,8 @@ def calendar():
         SELECT retailer_week, item_id, quantity_threshold, spend_threshold,
                reward_dollars, reward_percent, reward_total_price,
                coupon_dollar_value, coupon_percent_value, coupon_total_price,
-               crl_string, coupon_string, promo_price_string
+               crl_string, coupon_string, promo_price_string,
+               (CASE WHEN promo_type=\'weekly ad\' THEN \'Weekly Ad Feature\' ELSE NULL END) AS weekly_ad
         FROM promos 
         WHERE retailer = :retailer 
         AND brand ILIKE :brand
@@ -568,33 +569,36 @@ def calendar():
     )
 
     # Group columns for aggregation
-    cols_group = [
-        "quantity_threshold",
-        "spend_threshold",
-        "reward_dollars",
-        "reward_percent",
-        "reward_total_price",
-        "coupon_dollar_value",
-        "coupon_percent_value",
-        "coupon_total_price",
-    ]
+    cols_groups = {
+    "offer":
+        [
+            "quantity_threshold",
+            "spend_threshold",
+            "reward_dollars",
+            "reward_percent",
+            "reward_total_price"
+        ],
+    "coupon":
+        [
+            "coupon_dollar_value",
+            "coupon_percent_value",
+            "coupon_total_price"
+        ],
+    "weekly ad":
+        [
+            "weekly_ad"
+        ]
+    }
 
     # Aggregate promotions
-    promos = (
-        df.groupby(by=cols_group, dropna=False)
-        .apply(
-            lambda x: pd.Series(
-                {
-                    "retailer_week": x["retailer_week"].dropna().unique(),
-                    "item_id": x["item_id"].dropna().unique(),
-                    "coupon_string": x["coupon_string"].dropna().unique(),
-                    "crl_string": x["crl_string"].dropna().unique(),
-                    "promo_price_string": x["promo_price_string"].dropna().unique(),
-                }
-            )
-        )
-        .reset_index()
-    )
+    promos = df.groupby(by=cols_groups[promo_type], dropna=False).apply(lambda x: pd.Series({
+        'retailer_week': x['retailer_week'].dropna().unique(),
+        'item_id': x['item_id'].dropna().unique(),
+        'coupon_string': x['coupon_string'].dropna().unique(),
+        'crl_string': x['crl_string'].dropna().unique(),
+        'promo_price_string': x['promo_price_string'].dropna().unique()
+    })).reset_index()
+    promos = promos.dropna(subset=cols_groups[promo_type], how='all')
 
     promos["retailer_week"] = promos["retailer_week"].apply(build_date_groups)
     promos = promos.explode("retailer_week")
@@ -614,7 +618,7 @@ def calendar():
         promo_pred["promo_start_date"]
         + timedelta(days=7) * promo_pred["promo_length_weeks"]
         - timedelta(days=1)
-    )
+    ) if not promo_pred.empty else np.nan
 
     # Prepare response
     calendar_data = promo_pred.to_dict("records")
