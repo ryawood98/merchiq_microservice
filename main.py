@@ -1,7 +1,8 @@
 import os
+import re
 from datetime import datetime as dt
 from datetime import timedelta
-from typing import List
+from typing import List, Literal
 
 import numpy as np
 import pandas as pd
@@ -38,13 +39,10 @@ class CsvData(BaseModel):
 class DataPred(BaseModel):
     historical_tpr: DataSeries
     prediction_tpr: DataSeries
-
     historical_crl: DataSeries
     prediction_crl: DataSeries
-
     historical_coupon: DataSeries
     prediction_coupon: DataSeries
-
     download_content: CsvData
 
 
@@ -53,8 +51,43 @@ class PredictionResponse(BaseModel):
     data: DataPred | None
 
 
+class CalendarRequest(BaseModel):
+    promo_type: Literal["offer", "coupon", "weekly ad"]
+    retailer: str
+    brand: str
+
+
+class CalendarResponse(BaseModel):
+    status: str
+    data: List[dict] | None
+
+
+def convert_numpy_arrays(obj):
+    """Recursively convert numpy arrays to lists in a nested structure."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_arrays(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_arrays(item) for item in obj]
+    return obj
+
+
+def build_date_groups(arr):
+    """Group consecutive dates that are 7 days apart."""
+    arr = sorted(arr)
+    date_groups = [[arr[0]]]
+    for d in arr[1:]:
+        if (d - date_groups[-1][-1]).days == 7:
+            date_groups[-1].append(d)
+        else:
+            date_groups.append([d])
+    return date_groups
+
+
 @app.route("/prediction", methods=["POST"])
 def prediction():
+    """Handle prediction requests for promotional data."""
     try:
         req = PredictionRequest(**request.json)
     except ValidationError as e:
@@ -71,10 +104,14 @@ def prediction():
     item_names = req.item_names
     retailers = req.retailers
 
-    # Query the database to get the data that we need
-    query = "SELECT * FROM promos WHERE item_name IN :item_names \
-    AND (non_promo_price IS NULL OR non_promo_price BETWEEN :min_price AND :max_price) \
-    AND retailer IN :retailers;"
+    query = """
+        SELECT * FROM promos 
+        WHERE item_name IN :item_names 
+        AND (non_promo_price IS NULL 
+             OR non_promo_price BETWEEN :min_price AND :max_price) 
+        AND retailer IN :retailers;
+    """
+
     with engine.begin() as conn:
         df = pd.read_sql(
             sqlalchemy.text(query),
@@ -458,6 +495,127 @@ def prediction():
         data=data_pred,
     )
     return jsonify(res.model_dump()), 200
+
+
+@app.route("/calendar", methods=["POST"])
+def calendar():
+    """Handle calendar requests for promotional data."""
+    try:
+        req = CalendarRequest(**request.json)
+    except ValidationError as e:
+        print(e)
+        error = str(e)
+        res = CalendarResponse(
+            status=error,
+            data=None,
+        )
+        return jsonify(res.model_dump()), 400
+
+    promo_type = req.promo_type
+    retailer = req.retailer
+    brand = req.brand
+
+    query = """
+        SELECT retailer_week, item_id, quantity_threshold, spend_threshold,
+               reward_dollars, reward_percent, reward_total_price,
+               coupon_dollar_value, coupon_percent_value, coupon_total_price,
+               crl_string, coupon_string, promo_price_string
+        FROM promos 
+        WHERE retailer = :retailer 
+        AND brand ILIKE :brand
+        ORDER BY retailer_week;
+    """
+
+    with engine.begin() as conn:
+        df = pd.read_sql(
+            sqlalchemy.text(query),
+            conn,
+            params={
+                "retailer": retailer,
+                "brand": brand,
+            },
+            parse_dates=["retailer_week"],
+        )
+
+    if df.empty:
+        res = CalendarResponse(
+            status="No promotions found for the given criteria",
+            data=None,
+        )
+        return jsonify(res.model_dump()), 404
+
+    # Clean and prepare item IDs
+    df["item_id"] = (
+        df["item_id"]
+        .dropna()
+        .apply(
+            lambda x: re.match(r"{(\d+\-?\d*\-?\d*)(?:\.0)?}", x)
+            .group(1)
+            .replace("-", "")
+        )
+        .astype(int)
+    )
+
+    # Group columns for aggregation
+    cols_group = [
+        "quantity_threshold",
+        "spend_threshold",
+        "reward_dollars",
+        "reward_percent",
+        "reward_total_price",
+        "coupon_dollar_value",
+        "coupon_percent_value",
+        "coupon_total_price",
+    ]
+
+    # Aggregate promotions
+    promos = (
+        df.groupby(by=cols_group, dropna=False)
+        .apply(
+            lambda x: pd.Series(
+                {
+                    "retailer_week": x["retailer_week"].dropna().unique(),
+                    "item_id": x["item_id"].dropna().unique(),
+                    "coupon_string": x["coupon_string"].dropna().unique(),
+                    "crl_string": x["crl_string"].dropna().unique(),
+                    "promo_price_string": x["promo_price_string"].dropna().unique(),
+                }
+            )
+        )
+        .reset_index()
+    )
+
+    promos["retailer_week"] = promos["retailer_week"].apply(build_date_groups)
+    promos = promos.explode("retailer_week")
+    promos["promo_start_date"] = promos["retailer_week"].apply(lambda x: x[0])
+
+    # Create predictions
+    promo_pred = promos.loc[
+        (promos["promo_start_date"] > (dt.now() - timedelta(days=365)))
+    ].copy()
+
+    promo_pred["promo_start_date"] += timedelta(days=365)
+    promo_pred["retailer_week"] = promo_pred["retailer_week"].apply(
+        lambda x: [d + timedelta(days=365) for d in x]
+    )
+    promo_pred["promo_length_weeks"] = promo_pred["retailer_week"].apply(len)
+    promo_pred["promo_end_date"] = (
+        promo_pred["promo_start_date"]
+        + timedelta(days=7) * promo_pred["promo_length_weeks"]
+        - timedelta(days=1)
+    )
+
+    # Prepare response
+    calendar_data = promo_pred.to_dict("records")
+    for record in calendar_data:
+        record["retailer_week"] = [x.isoformat() for x in record["retailer_week"]]
+
+    res = CalendarResponse(
+        status="GOOD REQUEST",
+        data=calendar_data,
+    )
+    response_data = convert_numpy_arrays(res.model_dump())
+    return jsonify(response_data), 200
 
 
 if __name__ == "__main__":
