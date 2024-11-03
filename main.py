@@ -85,6 +85,17 @@ def build_date_groups(arr):
     return date_groups
 
 
+def replace_nan_with_none(obj):
+    """Recursively replace numpy NaN values with None in a nested structure."""
+    if isinstance(obj, float) and np.isnan(obj):
+        return None
+    elif isinstance(obj, dict):
+        return {key: replace_nan_with_none(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [replace_nan_with_none(item) for item in obj]
+    return obj
+
+
 @app.route("/prediction", methods=["POST"])
 def prediction():
     """Handle prediction requests for promotional data."""
@@ -615,6 +626,7 @@ def calendar():
         data=calendar_data,
     )
     response_data = convert_numpy_arrays(res.model_dump())
+    response_data = replace_nan_with_none(response_data)
     return jsonify(response_data), 200
 
 
