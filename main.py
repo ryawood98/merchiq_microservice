@@ -62,6 +62,74 @@ class CalendarResponse(BaseModel):
     data: List[dict] | None
 
 
+def build_coupon_string(row):
+    if not pd.isnull(row["coupon_dollar_value"]):
+        if (
+            not pd.isnull(row["coupon_quantity_threshold"])
+            and row["coupon_quantity_threshold"] != 1
+        ):
+            prefix = "Buy " + str(int(row["coupon_quantity_threshold"])) + " Get "
+        elif not pd.isnull(row["coupon_spend_threshold"]):
+            prefix = (
+                "Spend $" + "%.2f" % round(row["coupon_spend_threshold"], 2) + " Get "
+            )
+        else:
+            prefix = ""
+        if row["coupon_dollar_value"] < 1:
+            reward = str(int(100 * row["coupon_dollar_value"])) + "¢ Off"
+        else:
+            reward = "$" + "%.2f" % round(row["coupon_dollar_value"], 2) + " Off"
+    elif not pd.isnull(row["coupon_percent_value"]):
+        if not pd.isnull(row["coupon_quantity_threshold"]):
+            prefix = "Buy " + str(int(row["coupon_quantity_threshold"])) + " Get "
+        elif not pd.isnull(row["coupon_spend_threshold"]):
+            prefix = (
+                "Spend $" + "%.2f" % round(row["coupon_spend_threshold"], 2) + " Get "
+            )
+        else:
+            prefix = ""
+        reward = str(int(row["coupon_percent_value"])) + "% Off"
+    elif not pd.isnull(row["coupon_total_price"]):
+        if not pd.isnull(row["coupon_quantity_threshold"]):
+            prefix = str(int(row["coupon_quantity_threshold"])) + " For "
+        else:
+            prefix = "1 For "
+        reward = "$" + str(row["coupon_total_price"]) + " After Discount"
+    return prefix + reward
+
+
+def build_offer_string(row):
+    if not pd.isnull(row["reward_dollars"]):
+        if not pd.isnull(row["quantity_threshold"]) and row["quantity_threshold"] != 1:
+            prefix = "Buy " + str(int(row["quantity_threshold"])) + " Get "
+        elif not pd.isnull(row["spend_threshold"]):
+            prefix = "Spend $" + "%.2f" % round(row["spend_threshold"], 2) + " Get "
+        else:
+            prefix = ""
+        if row["reward_dollars"] < 1:
+            reward = str(int(100 * row["reward_dollars"])) + "¢"
+        else:
+            reward = "$" + "%.2f" % round(row["reward_dollars"], 2)
+    elif not pd.isnull(row["reward_percent"]):
+        if not pd.isnull(row["quantity_threshold"]) and row["quantity_threshold"] > 1:
+            if row["quantity_threshold"] == 2:
+                prefix = "Buy One Get One "
+            else:
+                prefix = "Buy " + str(int(row["quantity_threshold"]) - 1) + " Get One "
+        elif not pd.isnull(row["spend_threshold"]):
+            prefix = "Spend $" + "%.2f" % round(row["spend_threshold"], 2) + " Get "
+        else:
+            prefix = ""
+        reward = str(int(row["reward_percent"])) + "% Off"
+    elif not pd.isnull(row["reward_total_price"]):
+        if not pd.isnull(row["quantity_threshold"]):
+            prefix = str(int(row["quantity_threshold"])) + " For "
+        else:
+            prefix = "1 For "
+        reward = "$" + str(row["reward_total_price"]) + " After Discount"
+    return prefix + reward
+
+
 def convert_numpy_arrays(obj):
     """Recursively convert numpy arrays to lists in a nested structure."""
     if isinstance(obj, np.ndarray):
@@ -203,8 +271,7 @@ def prediction():
     merch_grid["tpr_disc"] = merch_grid["tpr_disc"].fillna(0.0).round(2)
     merch_grid["tpr_disc_desc"] = merch_grid["tpr_disc_desc"].fillna("$0.00")
 
-    # Create discount model
-    ## Create lagged promo
+    # Create lagged promo
     merch_grid["tpr_disc_ly"] = merch_grid["tpr_disc"].shift(52).fillna(0.0)
     merch_grid["tpr_disc_desc_ly"] = merch_grid["tpr_disc_desc"].shift(52)
 
@@ -528,10 +595,11 @@ def calendar():
 
     query = """
         SELECT retailer_week, item_id, quantity_threshold, spend_threshold,
-               reward_dollars, reward_percent, reward_total_price,
-               coupon_dollar_value, coupon_percent_value, coupon_total_price,
-               crl_string, coupon_string, promo_price_string,
-               (CASE WHEN promo_type=\'weekly ad\' THEN \'Weekly Ad Feature\' ELSE NULL END) AS weekly_ad
+                reward_dollars, reward_percent, reward_total_price,
+                coupon_dollar_value, coupon_percent_value, coupon_total_price,
+                coupon_quantity_threshold,coupon_spend_threshold,
+                crl_string, coupon_string, promo_price_string,
+                (CASE WHEN promo_type=\'weekly ad\' THEN \'Weekly Ad Feature\' ELSE NULL END) AS weekly_ad
         FROM promos 
         WHERE retailer = :retailer 
         AND brand ILIKE :brand
@@ -577,7 +645,13 @@ def calendar():
             "reward_percent",
             "reward_total_price",
         ],
-        "coupon": ["coupon_dollar_value", "coupon_percent_value", "coupon_total_price"],
+        "coupon": [
+            "coupon_dollar_value",
+            "coupon_percent_value",
+            "coupon_total_price",
+            "coupon_quantity_threshold",
+            "coupon_spend_threshold",
+        ],
         "weekly ad": ["weekly_ad"],
     }
 
@@ -605,10 +679,10 @@ def calendar():
 
     # Create predictions
     promo_pred = promos.loc[
-        (promos["promo_start_date"] > (dt.now() - timedelta(days=365)))
+        (promos["promo_start_date"] > (dt.now() - timedelta(days=364)))
     ].copy()
 
-    promo_pred["promo_start_date"] += timedelta(days=365)
+    promo_pred["promo_start_date"] += timedelta(days=364)
     promo_pred["retailer_week"] = promo_pred["retailer_week"].apply(
         lambda x: [d + timedelta(days=365) for d in x]
     )
@@ -622,6 +696,19 @@ def calendar():
         if not promo_pred.empty
         else np.nan
     )
+    promo_pred["probability"] = 0.75
+
+    # create display string
+    if promo_type == "coupon":
+        promo_pred["display_string"] = (
+            None if promo_pred.empty else promo_pred.apply(build_coupon_string, axis=1)
+        )
+    elif promo_type == "offer":
+        promo_pred["display_string"] = (
+            None if promo_pred.empty else promo_pred.apply(build_offer_string, axis=1)
+        )
+    elif promo_type == "weekly ad":
+        promo_pred["display_string"] = "Weekly Ad Feature"
 
     # Prepare response
     calendar_data = promo_pred.to_dict("records")
