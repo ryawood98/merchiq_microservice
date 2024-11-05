@@ -11,6 +11,8 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from pydantic import BaseModel, ValidationError
 
+from helpers import generate_promo_plan
+
 # Create the flask app
 app = Flask(__name__)
 CORS(app)
@@ -58,6 +60,19 @@ class CalendarRequest(BaseModel):
 
 
 class CalendarResponse(BaseModel):
+    status: str
+    data: List[dict] | None
+
+
+class GenerateRequest(BaseModel):
+    promo_type: Literal["offer", "coupon", "weekly ad"]
+    retailer: str
+    competitor_brand: str
+    own_brand: str
+    # Add any additional parameters needed for generation
+
+
+class GenerateResponse(BaseModel):
     status: str
     data: List[dict] | None
 
@@ -128,6 +143,125 @@ def build_offer_string(row):
             prefix = "1 For "
         reward = "$" + str(row["reward_total_price"]) + " After Discount"
     return prefix + reward
+
+
+def build_promo_list(retailer, brand, promo_type):
+    query = """
+        SELECT retailer_week, item_id, quantity_threshold, spend_threshold,
+                reward_dollars, reward_percent, reward_total_price,
+                coupon_dollar_value, coupon_percent_value, coupon_total_price,
+                coupon_quantity_threshold,coupon_spend_threshold,
+                crl_string, coupon_string, promo_price_string,
+                (CASE WHEN promo_type=\'weekly ad\' THEN \'Weekly Ad Feature\' ELSE NULL END) AS weekly_ad
+        FROM promos 
+        WHERE retailer = :retailer 
+        AND brand = :brand
+        ORDER BY retailer_week;
+    """
+
+    with engine.begin() as conn:
+        df = pd.read_sql(
+            sqlalchemy.text(query),
+            conn,
+            params={
+                "retailer": retailer,
+                "brand": brand,
+            },
+            parse_dates=["retailer_week"],
+        )
+
+    if df.empty:
+        raise Exception("No promotions found for the given criteria")
+
+    # Clean and prepare item IDs
+    df["item_id"] = (
+        df["item_id"]
+        .dropna()
+        .apply(
+            lambda x: re.match(r"{(\d+\-?\d*\-?\d*)(?:\.0)?}", x)
+            .group(1)
+            .replace("-", "")
+        )
+        .astype(int)
+    )
+
+    # Group columns for aggregation
+    cols_groups = {
+        "offer": [
+            "quantity_threshold",
+            "spend_threshold",
+            "reward_dollars",
+            "reward_percent",
+            "reward_total_price",
+        ],
+        "coupon": [
+            "coupon_dollar_value",
+            "coupon_percent_value",
+            "coupon_total_price",
+            "coupon_quantity_threshold",
+            "coupon_spend_threshold",
+        ],
+        "weekly ad": ["weekly_ad"],
+    }
+
+    # Aggregate promotions
+    promos = (
+        df.groupby(by=cols_groups[promo_type], dropna=False)
+        .apply(
+            lambda x: pd.Series(
+                {
+                    "retailer_week": x["retailer_week"].dropna().unique(),
+                    "item_id": x["item_id"].dropna().unique(),
+                    "coupon_string": x["coupon_string"].dropna().unique(),
+                    "crl_string": x["crl_string"].dropna().unique(),
+                    "promo_price_string": x["promo_price_string"].dropna().unique(),
+                }
+            )
+        )
+        .reset_index()
+    )
+    promos = promos.dropna(subset=cols_groups[promo_type], how="all")
+
+    promos["retailer_week"] = promos["retailer_week"].apply(build_date_groups)
+    promos = promos.explode("retailer_week")
+    promos["promo_start_date"] = promos["retailer_week"].apply(lambda x: x[0])
+
+    # Create predictions
+    promo_pred = promos.loc[
+        (promos["promo_start_date"] > (dt.now() - timedelta(days=364)))
+    ].copy()
+
+    promo_pred["promo_start_date"] += timedelta(days=364)
+    promo_pred["retailer_week"] = promo_pred["retailer_week"].apply(
+        lambda x: [d + timedelta(days=365) for d in x]
+    )
+    promo_pred["promo_length_weeks"] = promo_pred["retailer_week"].apply(len)
+    promo_pred["promo_end_date"] = (
+        (
+            promo_pred["promo_start_date"]
+            + timedelta(days=7) * promo_pred["promo_length_weeks"]
+            - timedelta(days=1)
+        )
+        if not promo_pred.empty
+        else np.nan
+    )
+
+    # TODO: FIX THIS SHIT LATER
+    promo_pred["probability"] = np.random.beta(7, 3, size=promo_pred.shape[0])
+
+    # create display string
+    if promo_type == "coupon":
+        promo_pred["display_string"] = (
+            None if promo_pred.empty else promo_pred.apply(build_coupon_string, axis=1)
+        )
+    elif promo_type == "offer":
+        promo_pred["display_string"] = (
+            None if promo_pred.empty else promo_pred.apply(build_offer_string, axis=1)
+        )
+    elif promo_type == "weekly ad":
+        promo_pred["display_string"] = "Weekly Ad Feature"
+
+    return promo_pred
 
 
 def convert_numpy_arrays(obj):
@@ -593,131 +727,91 @@ def calendar():
     retailer = req.retailer
     brand = req.brand
 
-    query = """
-        SELECT retailer_week, item_id, quantity_threshold, spend_threshold,
-                reward_dollars, reward_percent, reward_total_price,
-                coupon_dollar_value, coupon_percent_value, coupon_total_price,
-                coupon_quantity_threshold,coupon_spend_threshold,
-                crl_string, coupon_string, promo_price_string,
-                (CASE WHEN promo_type=\'weekly ad\' THEN \'Weekly Ad Feature\' ELSE NULL END) AS weekly_ad
-        FROM promos 
-        WHERE retailer = :retailer 
-        AND brand ILIKE :brand
-        ORDER BY retailer_week;
-    """
-
-    with engine.begin() as conn:
-        df = pd.read_sql(
-            sqlalchemy.text(query),
-            conn,
-            params={
-                "retailer": retailer,
-                "brand": brand,
-            },
-            parse_dates=["retailer_week"],
-        )
-
-    if df.empty:
+    # Build promo_pred dataframe
+    try:
+        promo_pred = build_promo_list(retailer, brand, promo_type)
+    except Exception as e:
         res = CalendarResponse(
-            status="No promotions found for the given criteria",
+            status=str(e),
             data=None,
         )
-        return jsonify(res.model_dump()), 404
-
-    # Clean and prepare item IDs
-    df["item_id"] = (
-        df["item_id"]
-        .dropna()
-        .apply(
-            lambda x: re.match(r"{(\d+\-?\d*\-?\d*)(?:\.0)?}", x)
-            .group(1)
-            .replace("-", "")
-        )
-        .astype(int)
-    )
-
-    # Group columns for aggregation
-    cols_groups = {
-        "offer": [
-            "quantity_threshold",
-            "spend_threshold",
-            "reward_dollars",
-            "reward_percent",
-            "reward_total_price",
-        ],
-        "coupon": [
-            "coupon_dollar_value",
-            "coupon_percent_value",
-            "coupon_total_price",
-            "coupon_quantity_threshold",
-            "coupon_spend_threshold",
-        ],
-        "weekly ad": ["weekly_ad"],
-    }
-
-    # Aggregate promotions
-    promos = (
-        df.groupby(by=cols_groups[promo_type], dropna=False)
-        .apply(
-            lambda x: pd.Series(
-                {
-                    "retailer_week": x["retailer_week"].dropna().unique(),
-                    "item_id": x["item_id"].dropna().unique(),
-                    "coupon_string": x["coupon_string"].dropna().unique(),
-                    "crl_string": x["crl_string"].dropna().unique(),
-                    "promo_price_string": x["promo_price_string"].dropna().unique(),
-                }
-            )
-        )
-        .reset_index()
-    )
-    promos = promos.dropna(subset=cols_groups[promo_type], how="all")
-
-    promos["retailer_week"] = promos["retailer_week"].apply(build_date_groups)
-    promos = promos.explode("retailer_week")
-    promos["promo_start_date"] = promos["retailer_week"].apply(lambda x: x[0])
-
-    # Create predictions
-    promo_pred = promos.loc[
-        (promos["promo_start_date"] > (dt.now() - timedelta(days=364)))
-    ].copy()
-
-    promo_pred["promo_start_date"] += timedelta(days=364)
-    promo_pred["retailer_week"] = promo_pred["retailer_week"].apply(
-        lambda x: [d + timedelta(days=365) for d in x]
-    )
-    promo_pred["promo_length_weeks"] = promo_pred["retailer_week"].apply(len)
-    promo_pred["promo_end_date"] = (
-        (
-            promo_pred["promo_start_date"]
-            + timedelta(days=7) * promo_pred["promo_length_weeks"]
-            - timedelta(days=1)
-        )
-        if not promo_pred.empty
-        else np.nan
-    )
-    promo_pred["probability"] = 0.75
-
-    # create display string
-    if promo_type == "coupon":
-        promo_pred["display_string"] = (
-            None if promo_pred.empty else promo_pred.apply(build_coupon_string, axis=1)
-        )
-    elif promo_type == "offer":
-        promo_pred["display_string"] = (
-            None if promo_pred.empty else promo_pred.apply(build_offer_string, axis=1)
-        )
-    elif promo_type == "weekly ad":
-        promo_pred["display_string"] = "Weekly Ad Feature"
+        return jsonify(res.model_dump()), 400
 
     # Prepare response
     calendar_data = promo_pred.to_dict("records")
     for record in calendar_data:
+        record["promo_start_date"] = record["promo_start_date"].isoformat()
+        record["promo_end_date"] = record["promo_end_date"].isoformat()
         record["retailer_week"] = [x.isoformat() for x in record["retailer_week"]]
 
     res = CalendarResponse(
         status="GOOD REQUEST",
         data=calendar_data,
+    )
+    response_data = convert_numpy_arrays(res.model_dump())
+    response_data = replace_nan_with_none(response_data)
+    return jsonify(response_data), 200
+
+
+@app.route("/generate", methods=["POST"])
+def generate():
+    """Handle generation requests for promotional data."""
+    try:
+        req = GenerateRequest(**request.json)
+    except ValidationError as e:
+        print(e)
+        error = str(e)
+        res = GenerateResponse(
+            status=error,
+            data=None,
+        )
+        return jsonify(res.model_dump()), 400
+
+    promo_type = req.promo_type
+    retailer = req.retailer
+    competitor_brand = req.competitor_brand
+    own_brand = req.own_brand
+
+    # Build promo_pred dataframe
+    try:
+        promo_pred = build_promo_list(retailer, competitor_brand, promo_type)
+    except Exception as e:
+        res = GenerateResponse(
+            status=str(e),
+            data=None,
+        )
+        return jsonify(res.model_dump()), 400
+
+    # Build promo_prev dataframe for own-brand previous year promotions
+    try:
+        promo_prev = build_promo_list(retailer, own_brand, promo_type)
+    except Exception as e:
+        res = GenerateResponse(
+            status=str(e),
+            data=None,
+        )
+        return jsonify(res.model_dump()), 400
+
+    # Use OpenAI to generate new promotion calendar
+    promo_pred["promo_type"] = promo_type
+    promo_prev["promo_type"] = promo_type
+    promo_generated_list = generate_promo_plan(promo_pred, promo_prev)
+
+    # After processing, convert to calendar_data format
+    for i in range(len(promo_generated_list)):
+        promo_generated_list[i]["promo_start_date"] = promo_generated_list[i][
+            "promo_start_date"
+        ].isoformat()
+        promo_generated_list[i]["promo_end_date"] = promo_generated_list[i][
+            "promo_end_date"
+        ].isoformat()
+        promo_generated_list[i]["retailer_week"] = [
+            x.isoformat() for x in promo_generated_list[i]["retailer_week"]
+        ]
+
+    res = GenerateResponse(
+        status="GOOD REQUEST",
+        data=promo_generated_list,
     )
     response_data = convert_numpy_arrays(res.model_dump())
     response_data = replace_nan_with_none(response_data)
