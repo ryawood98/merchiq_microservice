@@ -319,9 +319,10 @@ def prediction():
 
     query = """
         SELECT * FROM promos 
-        WHERE item_name IN :item_names 
-        AND (non_promo_price IS NULL 
-             OR non_promo_price BETWEEN :min_price AND :max_price) 
+        WHERE brand IN
+            (SELECT DISTINCT brand FROM promos WHERE item_name IN :item_names)
+        AND (non_promo_price_est IS NULL 
+             OR non_promo_price_est BETWEEN :min_price AND :max_price) 
         AND retailer IN :retailers;
     """
 
@@ -470,8 +471,8 @@ def prediction():
                         return pd.Series({"crl_disc": 0.0, "crl_disc_desc": "$0.00"})
 
                 # B5S5
-                elif pd.notnull(s["reward_dollars"]):
-                    crl_disc = s["reward_dollars"] / s["quantity_threshold"]
+                elif pd.notnull(s["reward_dollars_per_unit"]):
+                    crl_disc = s["reward_dollars_per_unit"]
                     return pd.Series(
                         {
                             "crl_disc": crl_disc,
@@ -489,7 +490,7 @@ def prediction():
                         crl_disc = (
                             s["non_promo_price_est"]
                             * s["reward_percent"]
-                            / s["quantity_threshold"]
+                            / (s["quantity_threshold"] + s["reward_percent_quantity"])
                         )
                         return pd.Series(
                             {
@@ -498,7 +499,8 @@ def prediction():
                                 + str(int(s["quantity_threshold"]))
                                 + " Save "
                                 + str(int(s["reward_percent"]))
-                                + "% of One",
+                                + "% on "
+                                + str(int(s["reward_percent_quantity"])),
                             }
                         )
                     else:
@@ -541,7 +543,13 @@ def prediction():
     merch_grid = df.join(merch_grid, how="inner")
     merch_grid = (
         merch_grid.groupby(by=["retailer_week"])[["crl_disc", "crl_disc_desc"]]
-        .max()
+        .apply(
+            lambda x: (
+                x.loc[x["crl_disc"].idxmax(), ["crl_disc", "crl_disc_desc"]]
+                if x.dropna().shape[0] > 0
+                else pd.Series({"crl_disc": np.nan, "crl_disc_desc": np.nan})
+            )
+        )
         .reset_index()
     )
     merch_grid = calendar.merge(merch_grid, on="retailer_week", how="left")
