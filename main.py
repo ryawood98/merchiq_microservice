@@ -246,7 +246,7 @@ def build_promo_list(retailer, brand, promo_type):
         else np.nan
     )
 
-    # TODO: FIX THIS SHIT LATER
+    np.random.seed(42)
     promo_pred["probability"] = np.random.beta(7, 3, size=promo_pred.shape[0])
 
     # create display string
