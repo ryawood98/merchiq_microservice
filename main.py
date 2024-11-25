@@ -318,7 +318,11 @@ def prediction():
     retailers = req.retailers
 
     query = """
-        SELECT * FROM promos 
+        SELECT DISTINCT retailer_week,non_promo_price_est,promo_price,tpr_disc,tpr_disc_percent,
+            quantity_threshold, spend_threshold, reward_total_price, reward_dollars, reward_dollars_per_unit,
+            reward_percent, reward_percent_quantity,
+            coupon_quantity_threshold, coupon_dollar_value,
+            offer_message_0, offer_message_1, offer_message_2 FROM promos 
         WHERE brand IN
             (SELECT DISTINCT brand FROM promos WHERE item_name IN :item_names)
         AND (non_promo_price_est IS NULL 
@@ -343,10 +347,12 @@ def prediction():
     idx_tpr_promo_price_null = df["tpr_disc"].isnull() & df["promo_price"].isnull()
     df.loc[idx_tpr_promo_price_null, "tpr_disc"] = 0
     idx_tpr_null = df["tpr_disc"].isnull()
-    df.loc[idx_tpr_null, "tpr_disc"] = df.loc[idx_tpr_null, "non_promo_price"].fillna(
-        (df.loc[idx_tpr_null, "promo_price"] / 0.8).round()
-    ) - df.loc[idx_tpr_null, "promo_price"].fillna(
-        df.loc[idx_tpr_null, "non_promo_price"]
+    df.loc[idx_tpr_null, "tpr_disc"] = df.loc[
+        idx_tpr_null, "non_promo_price_est"
+    ].fillna((df.loc[idx_tpr_null, "promo_price"] / 0.8).round()) - df.loc[
+        idx_tpr_null, "promo_price"
+    ].fillna(
+        df.loc[idx_tpr_null, "non_promo_price_est"]
     )
     df["is_offer"] = df["offer_message_0"].notnull().astype(int)
     if df.shape[0] == 0:
@@ -454,7 +460,7 @@ def prediction():
                 if pd.notnull(s["reward_total_price"]):
                     if pd.notnull(s["non_promo_price_est"]):
                         crl_disc = (
-                            s["non_promo_price"]
+                            s["non_promo_price_est"]
                             - s["reward_total_price"] / s["quantity_threshold"]
                         )
                         return pd.Series(
