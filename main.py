@@ -13,6 +13,7 @@ from pydantic import BaseModel, ValidationError
 
 from helpers import generate_promo_plan
 
+
 # Create the flask app
 app = Flask(__name__)
 CORS(app)
@@ -54,7 +55,7 @@ class PredictionResponse(BaseModel):
 
 
 class CalendarRequest(BaseModel):
-    promo_type: Literal["offer", "coupon", "weekly ad"]
+    promo_type: Literal["tpr", "crl", "coupon", "weekly ad"]
     retailer: str
     brand: str
 
@@ -65,7 +66,7 @@ class CalendarResponse(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    promo_type: Literal["offer", "coupon", "weekly ad"]
+    promo_type: Literal["tpr", "crl", "coupon", "weekly ad"]
     retailer: str
     competitor_brand: str
     own_brand: str
@@ -77,82 +78,13 @@ class GenerateResponse(BaseModel):
     data: List[dict] | None
 
 
-def build_coupon_string(row):
-    if not pd.isnull(row["coupon_dollar_value"]):
-        if (
-            not pd.isnull(row["coupon_quantity_threshold"])
-            and row["coupon_quantity_threshold"] != 1
-        ):
-            prefix = "Buy " + str(int(row["coupon_quantity_threshold"])) + " Get "
-        elif not pd.isnull(row["coupon_spend_threshold"]):
-            prefix = (
-                "Spend $" + "%.2f" % round(row["coupon_spend_threshold"], 2) + " Get "
-            )
-        else:
-            prefix = ""
-        if row["coupon_dollar_value"] < 1:
-            reward = str(int(100 * row["coupon_dollar_value"])) + "¢ Off"
-        else:
-            reward = "$" + "%.2f" % round(row["coupon_dollar_value"], 2) + " Off"
-    elif not pd.isnull(row["coupon_percent_value"]):
-        if not pd.isnull(row["coupon_quantity_threshold"]):
-            prefix = "Buy " + str(int(row["coupon_quantity_threshold"])) + " Get "
-        elif not pd.isnull(row["coupon_spend_threshold"]):
-            prefix = (
-                "Spend $" + "%.2f" % round(row["coupon_spend_threshold"], 2) + " Get "
-            )
-        else:
-            prefix = ""
-        reward = str(int(row["coupon_percent_value"])) + "% Off"
-    elif not pd.isnull(row["coupon_total_price"]):
-        if not pd.isnull(row["coupon_quantity_threshold"]):
-            prefix = str(int(row["coupon_quantity_threshold"])) + " For "
-        else:
-            prefix = "1 For "
-        reward = "$" + str(row["coupon_total_price"]) + " After Discount"
-    return prefix + reward
-
-
-def build_offer_string(row):
-    if not pd.isnull(row["reward_dollars"]):
-        if not pd.isnull(row["quantity_threshold"]) and row["quantity_threshold"] != 1:
-            prefix = "Buy " + str(int(row["quantity_threshold"])) + " Get "
-        elif not pd.isnull(row["spend_threshold"]):
-            prefix = "Spend $" + "%.2f" % round(row["spend_threshold"], 2) + " Get "
-        else:
-            prefix = ""
-        if row["reward_dollars"] < 1:
-            reward = str(int(100 * row["reward_dollars"])) + "¢"
-        else:
-            reward = "$" + "%.2f" % round(row["reward_dollars"], 2)
-    elif not pd.isnull(row["reward_percent"]):
-        if not pd.isnull(row["quantity_threshold"]) and row["quantity_threshold"] > 1:
-            if row["quantity_threshold"] == 2:
-                prefix = "Buy One Get One "
-            else:
-                prefix = "Buy " + str(int(row["quantity_threshold"]) - 1) + " Get One "
-        elif not pd.isnull(row["spend_threshold"]):
-            prefix = "Spend $" + "%.2f" % round(row["spend_threshold"], 2) + " Get "
-        else:
-            prefix = ""
-        reward = str(int(row["reward_percent"])) + "% Off"
-    elif not pd.isnull(row["reward_total_price"]):
-        if not pd.isnull(row["quantity_threshold"]):
-            prefix = str(int(row["quantity_threshold"])) + " For "
-        else:
-            prefix = "1 For "
-        reward = "$" + str(row["reward_total_price"]) + " After Discount"
-    return prefix + reward
 
 
 def build_promo_list(retailer, brand, promo_type):
     query = """
-        SELECT retailer_week, item_id, quantity_threshold, spend_threshold,
-                reward_dollars, reward_percent, reward_total_price,
-                coupon_dollar_value, coupon_percent_value, coupon_total_price,
-                coupon_quantity_threshold,coupon_spend_threshold,
-                crl_string, coupon_string, promo_price_string,
-                (CASE WHEN promo_type=\'weekly ad\' THEN \'Weekly Ad Feature\' ELSE NULL END) AS weekly_ad
+        SELECT retailer_week, item_id, tpr_disc_unitized, tpr_disc_unitized_desc,
+            crl_disc_unitized, crl_disc_unitized_desc, coupon_quantity_threshold, coupon_disc_unitized, coupon_disc_unitized_desc,
+            (CASE WHEN promo_type='weekly ad' THEN 'Weekly Ad Feature' ELSE NULL END) AS weekly_ad
         FROM promos 
         WHERE retailer = :retailer 
         AND brand = :brand
@@ -173,12 +105,32 @@ def build_promo_list(retailer, brand, promo_type):
     if df.empty:
         raise Exception("No promotions found for the given criteria")
 
+    # bucket TPR and coupon discounts for better grouping
+    def bucket_discounts(disc, suffix):
+        if disc<0.5:
+            return "$0.00-$0.50 " + suffix
+        elif disc<=1:
+            return "$0.50-$1.00 " + suffix
+        elif disc<=2:
+            return "$1-$2 " + suffix
+        elif disc>=3:
+            return "$2-$3 " + suffix
+        elif disc<=5:
+            return "$3-$5 " + suffix
+        elif disc<=10:
+            "$5-10 " + suffix
+        else:
+            return "$10+ " + suffix
+    df["tpr_disc_unitized_desc_bucketed"] = df["tpr_disc_unitized"].apply(bucket_discounts, suffix="TPR")
+    df["coupon_disc_unitized_desc_bucketed"] = None
+    df.loc[(df["coupon_quantity_threshold"]==1), "coupon_disc_unitized_desc_bucketed"] = df.loc[(df["coupon_quantity_threshold"]==1), "coupon_disc_unitized"].apply(bucket_discounts, suffix="Coupon")
+
     # Clean and prepare item IDs
     df["item_id"] = (
         df["item_id"]
         .dropna()
         .apply(
-            lambda x: re.match(r"{(\d+\-?\d*\-?\d*)(?:\.0)?}", x)
+            lambda x: re.match(r"{?(\d+\-?\d*\-?\d*)(?:\.0)?}?", x)
             .group(1)
             .replace("-", "")
         )
@@ -187,19 +139,14 @@ def build_promo_list(retailer, brand, promo_type):
 
     # Group columns for aggregation
     cols_groups = {
-        "offer": [
-            "quantity_threshold",
-            "spend_threshold",
-            "reward_dollars",
-            "reward_percent",
-            "reward_total_price",
+        "tpr": [
+            "tpr_disc_unitized_desc_bucketed",
+        ],
+        "crl": [
+            "crl_disc_unitized_desc",
         ],
         "coupon": [
-            "coupon_dollar_value",
-            "coupon_percent_value",
-            "coupon_total_price",
-            "coupon_quantity_threshold",
-            "coupon_spend_threshold",
+            "coupon_disc_unitized_desc_bucketed",
         ],
         "weekly ad": ["weekly_ad"],
     }
@@ -212,11 +159,8 @@ def build_promo_list(retailer, brand, promo_type):
                 {
                     "retailer_week": x["retailer_week"].dropna().unique(),
                     "item_id": x["item_id"].dropna().unique(),
-                    "coupon_string": x["coupon_string"].dropna().unique(),
-                    "crl_string": x["crl_string"].dropna().unique(),
-                    "promo_price_string": x["promo_price_string"].dropna().unique(),
                 }
-            )
+            ), include_groups=False
         )
         .reset_index()
     )
@@ -250,14 +194,12 @@ def build_promo_list(retailer, brand, promo_type):
     promo_pred["probability"] = np.random.beta(7, 3, size=promo_pred.shape[0])
 
     # create display string
-    if promo_type == "coupon":
-        promo_pred["display_string"] = (
-            None if promo_pred.empty else promo_pred.apply(build_coupon_string, axis=1)
-        )
-    elif promo_type == "offer":
-        promo_pred["display_string"] = (
-            None if promo_pred.empty else promo_pred.apply(build_offer_string, axis=1)
-        )
+    if promo_type == "tpr":
+        promo_pred["display_string"] = promo_pred["tpr_disc_unitized_desc_bucketed"]
+    elif promo_type == "crl":
+        promo_pred["display_string"] = promo_pred["crl_disc_unitized_desc"]
+    elif promo_type == "coupon":
+        promo_pred["display_string"] = promo_pred["coupon_disc_unitized_desc_bucketed"]
     elif promo_type == "weekly ad":
         promo_pred["display_string"] = "Weekly Ad Feature"
 
@@ -318,13 +260,12 @@ def prediction():
     retailers = req.retailers
 
     query = """
-        SELECT DISTINCT retailer_week,non_promo_price_est,promo_price,tpr_disc,tpr_disc_percent,
-            quantity_threshold, spend_threshold, reward_total_price, reward_dollars, reward_dollars_per_unit,
-            reward_percent, reward_percent_quantity,
-            coupon_quantity_threshold, coupon_dollar_value,
+        SELECT DISTINCT retailer_week,non_promo_price_est,promo_price,tpr_disc_unitized,tpr_disc_unitized_desc,
+            crl_disc_unitized,crl_disc_unitized_desc,
+            coupon_disc_unitized,coupon_disc_unitized_desc,
             offer_message_0, offer_message_1, offer_message_2 FROM promos 
-        WHERE brand IN
-            (SELECT DISTINCT brand FROM promos WHERE item_name IN :item_names)
+        WHERE item_name IN :item_names
+            OR brand IN (SELECT DISTINCT brand FROM promos WHERE item_name IN :item_names)
         AND (non_promo_price_est IS NULL 
              OR non_promo_price_est BETWEEN :min_price AND :max_price) 
         AND retailer IN :retailers;
@@ -343,20 +284,10 @@ def prediction():
             parse_dates=["retailer_week"],
         )
 
-    # TPR = Temporary Price Reduction
-    idx_tpr_promo_price_null = df["tpr_disc"].isnull() & df["promo_price"].isnull()
-    df.loc[idx_tpr_promo_price_null, "tpr_disc"] = 0
-    idx_tpr_null = df["tpr_disc"].isnull()
-    df.loc[idx_tpr_null, "tpr_disc"] = df.loc[
-        idx_tpr_null, "non_promo_price_est"
-    ].fillna((df.loc[idx_tpr_null, "promo_price"] / 0.8).round()) - df.loc[
-        idx_tpr_null, "promo_price"
-    ].fillna(
-        df.loc[idx_tpr_null, "non_promo_price_est"]
-    )
-    df["is_offer"] = df["offer_message_0"].notnull().astype(int)
     if df.shape[0] == 0:
         print("No items found")
+
+    ####### Calendar Template ############
 
     # Look at the minimum date in our data but synced with the cadence
     # of the minimum and maximum promotion date
@@ -393,20 +324,29 @@ def prediction():
 
     # Create prediction for adblock
     ## Create merch grid
-    def quantify_tpr(s):
-        # given a series of products/metrics for one date, return a number and a displayable string for the tpr offer
-        tpr_discount = s["tpr_disc"]
-        tpr_discount_description = "$" + "{:.2f}".format(tpr_discount)
-        return pd.Series(
-            {"tpr_disc": tpr_discount, "tpr_disc_desc": tpr_discount_description}
-        )
-
-    merch_grid = df.apply(quantify_tpr, axis=1)
-    merch_grid = df.drop(["tpr_disc"], axis=1).join(merch_grid, how="inner")
     merch_grid = (
-        merch_grid.groupby(by=["retailer_week"])[["tpr_disc", "tpr_disc_desc"]]
-        .max()
-        .reset_index()
+        df.groupby(by=["retailer_week"])[
+            ["tpr_disc_unitized", "tpr_disc_unitized_desc"]
+        ]
+        .apply(
+            lambda x: (
+                x.loc[
+                    x["tpr_disc_unitized"].idxmax(),
+                    ["tpr_disc_unitized", "tpr_disc_unitized_desc"],
+                ]
+                if x.dropna().shape[0] > 0
+                else pd.Series(
+                    {"tpr_disc_unitized": np.nan, "tpr_disc_unitized_desc": "$0.00"}
+                )
+            )
+        )
+        .rename(
+            {
+                "tpr_disc_unitized": "tpr_disc",
+                "tpr_disc_unitized_desc": "tpr_disc_desc",
+            },
+            axis=1,
+        )
     )
     merch_grid = calendar.merge(merch_grid, on="retailer_week", how="left")
     merch_grid["tpr_disc"] = merch_grid["tpr_disc"].fillna(0.0).round(2)
@@ -427,7 +367,7 @@ def prediction():
         "tpr_disc_predicted"
     ].apply(lambda x: "{:.2f}".format(x))
 
-    # Merge coupon data into master merch grid
+    # Merge TPR data into master merch grid
     merch_grid_master = merch_grid_master.merge(
         merch_grid, on=["retailer_week", "week", "year"]
     )
@@ -450,113 +390,29 @@ def prediction():
 
     # Create prediction for adblock
     ## Create merch grid
-    def quantify_crl(s):
-        ### given a series of products/metrics for one date, return a number and a displayable string for the crl offer
-
-        if pd.notnull(s["quantity_threshold"]):
-            if s["quantity_threshold"] > 1:
-
-                # 2F10
-                if pd.notnull(s["reward_total_price"]):
-                    if pd.notnull(s["non_promo_price_est"]):
-                        crl_disc = (
-                            s["non_promo_price_est"]
-                            - s["reward_total_price"] / s["quantity_threshold"]
-                        )
-                        return pd.Series(
-                            {
-                                "crl_disc": crl_disc,
-                                "crl_disc_desc": "Buy "
-                                + str(int(s["quantity_threshold"]))
-                                + " Save $"
-                                + "{:.2f}".format(crl_disc)
-                                + " Each",
-                            }
-                        )
-                    else:
-                        return pd.Series({"crl_disc": 0.0, "crl_disc_desc": "$0.00"})
-
-                # B5S5
-                elif pd.notnull(s["reward_dollars_per_unit"]):
-                    crl_disc = s["reward_dollars_per_unit"]
-                    return pd.Series(
-                        {
-                            "crl_disc": crl_disc,
-                            "crl_disc_desc": "Buy "
-                            + str(int(s["quantity_threshold"]))
-                            + " Save $"
-                            + "{:.2f}".format(crl_disc)
-                            + " Each",
-                        }
-                    )
-
-                # BOGO
-                elif pd.notnull(s["reward_percent"]):
-                    if pd.notnull(s["non_promo_price_est"]):
-                        crl_disc = (
-                            s["non_promo_price_est"]
-                            * s["reward_percent"]
-                            / (s["quantity_threshold"] + s["reward_percent_quantity"])
-                        )
-                        return pd.Series(
-                            {
-                                "crl_disc": crl_disc,
-                                "crl_disc_desc": "Buy "
-                                + str(int(s["quantity_threshold"]))
-                                + " Save "
-                                + str(int(s["reward_percent"]))
-                                + "% on "
-                                + str(int(s["reward_percent_quantity"])),
-                            }
-                        )
-                    else:
-                        return pd.Series({"crl_disc": 0.0, "crl_disc_desc": "$0.00"})
-            else:
-                return pd.Series({"crl_disc": 0.0, "crl_disc_desc": "$0.00"})
-
-        elif pd.notnull(s["spend_threshold"]):
-
-            # S25S5
-            if pd.notnull(s["reward_dollars"]):
-                if pd.notnull(s["non_promo_price_est"]):
-                    crl_disc = s["reward_dollars"] / (
-                        s["spend_threshold"] / s["non_promo_price_est"]
-                    )
-                    return pd.Series(
-                        {
-                            "crl_disc": crl_disc,
-                            "crl_disc_desc": "Spend $"
-                            + "{:.2f}".format(s["spend_threshold"])
-                            + " Save $"
-                            + "{:.2f}".format(s["reward_dollars"]),
-                        }
-                    )
-                else:
-                    crl_disc = s["reward_dollars"]
-                    return pd.Series(
-                        {
-                            "crl_disc": crl_disc,
-                            "crl_disc_desc": "$" + "{:.2f}".format(crl_disc),
-                        }
-                    )
-            else:
-                return pd.Series({"crl_disc": 0.0, "crl_disc_desc": "$0.00"})
-
-        else:
-            return pd.Series({"crl_disc": 0.0, "crl_disc_desc": "$0.00"})
-
-    merch_grid = df.apply(quantify_crl, axis=1)
-    merch_grid = df.join(merch_grid, how="inner")
     merch_grid = (
-        merch_grid.groupby(by=["retailer_week"])[["crl_disc", "crl_disc_desc"]]
+        df.groupby(by=["retailer_week"])[
+            ["crl_disc_unitized", "crl_disc_unitized_desc"]
+        ]
         .apply(
             lambda x: (
-                x.loc[x["crl_disc"].idxmax(), ["crl_disc", "crl_disc_desc"]]
+                x.loc[
+                    x["crl_disc_unitized"].idxmax(),
+                    ["crl_disc_unitized", "crl_disc_unitized_desc"],
+                ]
                 if x.dropna().shape[0] > 0
-                else pd.Series({"crl_disc": np.nan, "crl_disc_desc": np.nan})
+                else pd.Series(
+                    {"crl_disc_unitized": np.nan, "crl_disc_unitized_desc": "$0.00"}
+                )
             )
         )
-        .reset_index()
+        .rename(
+            {
+                "crl_disc_unitized": "crl_disc",
+                "crl_disc_unitized_desc": "crl_disc_desc",
+            },
+            axis=1,
+        )
     )
     merch_grid = calendar.merge(merch_grid, on="retailer_week", how="left")
     merch_grid["crl_disc"] = merch_grid["crl_disc"].fillna(0.0).round(2)
@@ -601,32 +457,32 @@ def prediction():
 
     # Create prediction for adblock
     ## Create merch grid
-    def quantify_coupon(s):
-        ### given a series of products/metrics for one date, return a number and a displayable string for the crl offer
-
-        if pd.notnull(s["coupon_quantity_threshold"]):
-
-            # $5 Off 3
-            if pd.notnull(s["coupon_dollar_value"]):
-                coupon_disc = s["coupon_dollar_value"] / s["coupon_quantity_threshold"]
-                return pd.Series(
+    merch_grid = (
+        df.groupby(by=["retailer_week"])[
+            ["coupon_disc_unitized", "coupon_disc_unitized_desc"]
+        ]
+        .apply(
+            lambda x: (
+                x.loc[
+                    x["coupon_disc_unitized"].idxmax(),
+                    ["coupon_disc_unitized", "coupon_disc_unitized_desc"],
+                ]
+                if x.dropna().shape[0] > 0
+                else pd.Series(
                     {
-                        "coupon_disc": coupon_disc,
-                        "coupon_disc_desc": "$"
-                        + "{:.2f}".format(s["coupon_dollar_value"])
-                        + " Off "
-                        + str(int(s["coupon_quantity_threshold"])),
+                        "coupon_disc_unitized": np.nan,
+                        "coupon_disc_unitized_desc": "$0.00",
                     }
                 )
-
-        return pd.Series({"coupon_disc": 0.0, "coupon_disc_desc": "$0.00"})
-
-    merch_grid = df.apply(quantify_coupon, axis=1)
-    merch_grid = df.join(merch_grid, how="inner")
-    merch_grid = (
-        merch_grid.groupby(by=["retailer_week"])[["coupon_disc", "coupon_disc_desc"]]
-        .max()
-        .reset_index()
+            )
+        )
+        .rename(
+            {
+                "coupon_disc_unitized": "coupon_disc",
+                "coupon_disc_unitized_desc": "coupon_disc_desc",
+            },
+            axis=1,
+        )
     )
     merch_grid = calendar.merge(merch_grid, on="retailer_week", how="left")
     merch_grid["coupon_disc"] = merch_grid["coupon_disc"].fillna(0.0).round(2)
