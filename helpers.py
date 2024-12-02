@@ -66,7 +66,7 @@ You will not attach ``` or ```json to the response to signify that the response 
 """
 
 
-def retry(num_attempts=3, wait_time=4, wait_multiplier=1.5):
+def retry(num_attempts=5, wait_time=4, wait_multiplier=1.5):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -94,7 +94,7 @@ def retry(num_attempts=3, wait_time=4, wait_multiplier=1.5):
     return decorator
 
 
-@retry(num_attempts=5, wait_time=2, wait_multiplier=1.5)
+@retry(num_attempts=7, wait_time=2, wait_multiplier=1.5)
 def query_openai(system, user, extra_prompts=[]):
     messages = [
         {"role": "system", "content": system},
