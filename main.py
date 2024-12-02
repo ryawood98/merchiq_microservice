@@ -106,8 +106,11 @@ def build_promo_list(retailer, brand, promo_type):
         raise Exception("No promotions found for the given criteria")
 
     # bucket TPR and coupon discounts for better grouping
+    # TODO: handle percent TPRs and non-quantity-threshold=1 coupons
     def bucket_discounts(disc, suffix):
-        if disc<0.5:
+        if pd.isnull(disc):
+            return None
+        elif disc<0.5:
             return "$0.00-$0.50 " + suffix
         elif disc<=1:
             return "$0.50-$1.00 " + suffix
@@ -119,9 +122,12 @@ def build_promo_list(retailer, brand, promo_type):
             return "$3-$5 " + suffix
         elif disc<=10:
             "$5-10 " + suffix
-        else:
+        elif disc>10:
             return "$10+ " + suffix
-    df["tpr_disc_unitized_desc_bucketed"] = df["tpr_disc_unitized"].apply(bucket_discounts, suffix="TPR")
+        else:
+            return None
+    df["tpr_disc_unitized_desc_bucketed"] = None
+    df.loc[(df["tpr_disc_unitized"].notnull()),"tpr_disc_unitized_desc_bucketed"] = df.loc[(df["tpr_disc_unitized"].notnull()),"tpr_disc_unitized"].apply(bucket_discounts, suffix="TPR")
     df["coupon_disc_unitized_desc_bucketed"] = None
     df.loc[(df["coupon_quantity_threshold"]==1), "coupon_disc_unitized_desc_bucketed"] = df.loc[(df["coupon_quantity_threshold"]==1), "coupon_disc_unitized"].apply(bucket_discounts, suffix="Coupon")
 
