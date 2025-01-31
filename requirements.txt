@@ -19,4 +19,4 @@ sendgrid
 scikit-learn
 pydantic
 python-dotenv==1.0.1
-openai==1.54.3
+openai==1.55.3
