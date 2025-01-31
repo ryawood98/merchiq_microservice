@@ -371,7 +371,7 @@ def prediction():
     merch_grid["tpr_disc_predicted"] = merch_grid["tpr_disc_smoothed"]
     merch_grid["tpr_disc_desc_predicted"] = "$" + merch_grid[
         "tpr_disc_predicted"
-    ].apply(lambda x: "{:.2f}".format(x))
+    ].apply(lambda x: "{:.2f}".format(x)) + " Discount"
 
     # Merge TPR data into master merch grid
     merch_grid_master = merch_grid_master.merge(
