@@ -27,6 +27,7 @@ class PredictionRequest(BaseModel):
     max_price: float
     item_names: List[str]
     retailers: List[str]
+    use_entire_brand: bool = False
 
 
 class DataSeries(BaseModel):
@@ -264,18 +265,19 @@ def prediction():
     max_price = req.max_price
     item_names = req.item_names
     retailers = req.retailers
+    use_entire_brand = req.use_entire_brand# defaults to False based on PredictionRequest class
 
     query = """
         SELECT DISTINCT retailer_week,non_promo_price_est,promo_price,tpr_disc_unitized,tpr_disc_unitized_desc,
             crl_disc_unitized,crl_disc_unitized_desc,
             coupon_disc_unitized,coupon_disc_unitized_desc,
             offer_message_0, offer_message_1, offer_message_2 FROM promos 
-        WHERE item_name IN :item_names
-            OR brand IN (SELECT DISTINCT brand FROM promos WHERE item_name IN :item_names)
+        WHERE {}
         AND (non_promo_price_est IS NULL 
              OR non_promo_price_est BETWEEN :min_price AND :max_price) 
         AND retailer IN :retailers;
-    """
+    """.format("brand IN (SELECT DISTINCT brand FROM promos WHERE item_name IN :item_names)" if use_entire_brand 
+              else "item_name IN :item_names")
 
     with engine.begin() as conn:
         df = pd.read_sql(
@@ -292,6 +294,8 @@ def prediction():
 
     if df.shape[0] == 0:
         print("No items found")
+
+    # print("query result df[['retailer_week', 'coupon_disc_unitized_desc']]: ", df.iloc[:50][['retailer_week', 'coupon_disc_unitized_desc']])
 
     ####### Calendar Template ############
 
