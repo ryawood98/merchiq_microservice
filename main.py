@@ -27,7 +27,7 @@ class PredictionRequest(BaseModel):
     max_price: float
     item_names: List[str]
     retailers: List[str]
-    use_entire_brand: bool = False
+    use_entire_brand: bool = True
 
 
 class DataSeries(BaseModel):
