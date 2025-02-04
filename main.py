@@ -295,7 +295,6 @@ def prediction():
     if df.shape[0] == 0:
         print("No items found")
 
-    # print("query result df[['retailer_week', 'coupon_disc_unitized_desc']]: ", df.iloc[:50][['retailer_week', 'coupon_disc_unitized_desc']])
 
     ####### Calendar Template ############
 
