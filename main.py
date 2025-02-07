@@ -28,6 +28,7 @@ class PredictionRequest(BaseModel):
     item_names: List[str]
     retailers: List[str]
     use_entire_brand: bool = True
+    use_smoothing: bool = True
 
 
 class DataSeries(BaseModel):
@@ -265,7 +266,8 @@ def prediction():
     max_price = req.max_price
     item_names = req.item_names
     retailers = req.retailers
-    use_entire_brand = req.use_entire_brand# defaults to False based on PredictionRequest class
+    use_entire_brand = req.use_entire_brand# defaults to True based on PredictionRequest class
+    use_smoothing = req.use_smoothing# defaults to True based on PredictionRequest class
 
     query = """
         SELECT DISTINCT retailer_week,non_promo_price_est,promo_price,tpr_disc_unitized,tpr_disc_unitized_desc,
@@ -368,7 +370,7 @@ def prediction():
     # Create smoothed ly promo
     merch_grid["tpr_disc_smoothed"] = (
         merch_grid["tpr_disc_ly"]
-        .rolling(window=3, center=True, win_type="gaussian", min_periods=1)
+        .rolling(window=3 if use_smoothing else 1, center=True, win_type="gaussian", min_periods=1)
         .mean(std=1)
     )
     merch_grid["tpr_disc_predicted"] = merch_grid["tpr_disc_smoothed"]
@@ -435,7 +437,7 @@ def prediction():
     # Create smoothed ly promo
     merch_grid["crl_disc_smoothed"] = (
         merch_grid["crl_disc_ly"]
-        .rolling(window=3, center=True, win_type="gaussian", min_periods=1)
+        .rolling(window=3 if use_smoothing else 1, center=True, win_type="gaussian", min_periods=1)
         .mean(std=1)
     )
     merch_grid["crl_disc_predicted"] = merch_grid["crl_disc_smoothed"]
@@ -505,7 +507,7 @@ def prediction():
     # Create smoothed ly promo
     merch_grid["coupon_disc_smoothed"] = (
         merch_grid["coupon_disc_ly"]
-        .rolling(window=3, center=True, win_type="gaussian", min_periods=1)
+        .rolling(window=3 if use_smoothing else 1, center=True, win_type="gaussian", min_periods=1)
         .mean(std=1)
     )
     merch_grid["coupon_disc_predicted"] = merch_grid["coupon_disc_smoothed"]
